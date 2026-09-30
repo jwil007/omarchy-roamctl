@@ -1,0 +1,221 @@
+#!/bin/bash
+
+# Omarchy glue for roamctl (https://github.com/jwil007/roamctl).
+#
+#   roamctl-omarchy install [--yes]   install/upgrade roamctl + roamctl-tui from the latest release
+#   roamctl-omarchy uninstall         stop services, remove binaries, unit, and drop-in
+#   roamctl-omarchy status [iface]    JSON status for the shell plugin
+#   roamctl-omarchy enable [iface]    enable + start roamctl@iface
+#   roamctl-omarchy disable [iface]   disable + stop roamctl@iface
+#   roamctl-omarchy restart [iface]   restart roamctl@iface (e.g. after a config edit)
+#   roamctl-omarchy tui [iface]       open roamctl-tui in a terminal
+#   roamctl-omarchy config [iface]    edit /etc/roamctl/<iface>.toml, then restart the service
+#   roamctl-omarchy logs [iface]      follow the service journal in a terminal
+#
+# When [iface] is omitted, the first wireless interface is used.
+
+set -euo pipefail
+
+REPO="jwil007/roamctl"
+BIN_DIR="/usr/local/bin"
+UNIT_PATH="/etc/systemd/system/roamctl@.service"
+DROPIN_DIR="/etc/systemd/system/roamctl@.service.d"
+DROPIN_PATH="$DROPIN_DIR/omarchy.conf"
+SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+
+fail() {
+  echo "roamctl-omarchy: $*" >&2
+  exit 1
+}
+
+default_iface() {
+  local dev
+  for dev in /sys/class/net/*; do
+    if [[ -d $dev/wireless ]]; then
+      basename "$dev"
+      return
+    fi
+  done
+}
+
+resolve_iface() {
+  local iface="${1:-}"
+  [[ -n $iface ]] || iface="$(default_iface)"
+  [[ -n $iface ]] || fail "no wireless interface found"
+  [[ $iface =~ ^[A-Za-z0-9_.-]+$ ]] || fail "invalid interface name: $iface"
+  echo "$iface"
+}
+
+installed_version() {
+  if [[ -x $BIN_DIR/roamctl ]]; then
+    "$BIN_DIR/roamctl" -version 2>/dev/null || echo "unknown"
+  fi
+}
+
+# Run a command in a floating Omarchy terminal (install, config edit, etc.).
+in_terminal() {
+  exec omarchy-launch-floating-terminal-with-presentation "$*"
+}
+
+cmd_status() {
+  local iface active enabled version
+  iface="$(resolve_iface "${1:-}")"
+  version="$(installed_version)"
+  active="$(systemctl is-active "roamctl@$iface" 2>/dev/null || true)"
+  enabled="$(systemctl is-enabled "roamctl@$iface" 2>/dev/null || true)"
+  jq -cn \
+    --arg iface "$iface" \
+    --arg version "$version" \
+    --arg active "$active" \
+    --arg enabled "$enabled" \
+    --argjson unit "$([[ -f $UNIT_PATH ]] && echo true || echo false)" \
+    --argjson dropin "$([[ -f $DROPIN_PATH ]] && echo true || echo false)" \
+    --argjson tui "$([[ -x $BIN_DIR/roamctl-tui ]] && echo true || echo false)" \
+    '{
+      iface: $iface,
+      installed: ($version != "" and $unit),
+      version: $version,
+      tuiInstalled: $tui,
+      socketAccess: $dropin,
+      active: ($active == "active"),
+      activeState: $active,
+      enabled: ($enabled == "enabled")
+    }'
+}
+
+cmd_install() {
+  if [[ ${1:-} != --yes && ! -t 0 ]]; then
+    in_terminal "$SELF install --yes"
+  fi
+
+  local arch goarch latest current tmp iface
+  arch="$(uname -m)"
+  case "$arch" in
+    x86_64) goarch=amd64 ;;
+    aarch64 | arm64) goarch=arm64 ;;
+    armv6* | armv7* | armhf) goarch=arm ;;
+    *) fail "unsupported architecture: $arch" ;;
+  esac
+
+  latest="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | jq -r .tag_name)"
+  [[ -n $latest && $latest != null ]] || fail "could not look up the latest roamctl release"
+  current="$(installed_version)"
+  echo "Latest roamctl: $latest${current:+ (installed: $current)}"
+
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" EXIT
+
+  local base="https://github.com/$REPO/releases/download/$latest"
+  local name
+  curl -fsSL "$base/roamctl_${latest#v}_checksums.txt" -o "$tmp/checksums.txt"
+  for name in roamctl roamctl-tui; do
+    echo "Downloading ${name}_${goarch}.tar.gz"
+    curl -fsSL "$base/${name}_${goarch}.tar.gz" -o "$tmp/${name}_${goarch}.tar.gz"
+    (cd "$tmp" && grep " ${name}_${goarch}.tar.gz\$" checksums.txt | sha256sum -c --quiet) ||
+      fail "checksum mismatch for ${name}_${goarch}.tar.gz"
+    tar -xzf "$tmp/${name}_${goarch}.tar.gz" -C "$tmp" "$name"
+  done
+  curl -fsSL "https://raw.githubusercontent.com/$REPO/$latest/systemd/roamctl@.service" -o "$tmp/roamctl@.service"
+
+  # Upstream binds the IPC socket as root with mode 0755, so only root can
+  # read it. Hand it to the wheel group so the bar widget and roamctl-tui work
+  # without sudo. The socket is broadcast-only: roamctl never reads from it.
+  cat >"$tmp/omarchy.conf" <<'EOF'
+# Installed by the jwil007.roamctl Omarchy plugin.
+[Service]
+ExecStartPre=-/usr/bin/rm -f /run/roamctl/%i.sock
+ExecStartPost=/bin/sh -c 'for n in $$(seq 100); do if [ -S /run/roamctl/%i.sock ]; then chgrp wheel /run/roamctl/%i.sock && chmod 0660 /run/roamctl/%i.sock; exit 0; fi; sleep 0.1; done; exit 0'
+EOF
+
+  echo "Installing to $BIN_DIR (sudo)"
+  sudo install -Dm755 "$tmp/roamctl" "$BIN_DIR/roamctl"
+  sudo install -Dm755 "$tmp/roamctl-tui" "$BIN_DIR/roamctl-tui"
+  sudo install -Dm644 "$tmp/roamctl@.service" "$UNIT_PATH"
+  sudo install -Dm644 "$tmp/omarchy.conf" "$DROPIN_PATH"
+  sudo systemctl daemon-reload
+
+  iface="$(default_iface)"
+  if [[ -n $iface ]] && systemctl is-active --quiet "roamctl@$iface"; then
+    echo "Restarting roamctl@$iface"
+    sudo systemctl restart "roamctl@$iface"
+  fi
+
+  echo
+  echo "roamctl $latest installed. Toggle it from the roamctl bar widget, or:"
+  echo "  roamctl-omarchy enable${iface:+ $iface}"
+}
+
+cmd_uninstall() {
+  if [[ ! -t 0 ]]; then
+    in_terminal "$SELF uninstall"
+  fi
+  local units
+  units="$(systemctl list-units 'roamctl@*' --all --no-legend --plain | awk '{print $1}')"
+  if [[ -n $units ]]; then
+    # shellcheck disable=SC2086
+    sudo systemctl disable --now $units
+  fi
+  sudo rm -rf "$DROPIN_DIR" "$UNIT_PATH" "$BIN_DIR/roamctl" "$BIN_DIR/roamctl-tui" /run/roamctl
+  sudo systemctl daemon-reload
+  echo "roamctl removed. Config in /etc/roamctl was kept."
+}
+
+# systemctl asks the Omarchy polkit agent for authorization when needed.
+cmd_enable() {
+  local iface
+  iface="$(resolve_iface "${1:-}")"
+  systemctl enable --now "roamctl@$iface"
+}
+
+cmd_disable() {
+  local iface
+  iface="$(resolve_iface "${1:-}")"
+  systemctl disable --now "roamctl@$iface"
+}
+
+cmd_restart() {
+  local iface
+  iface="$(resolve_iface "${1:-}")"
+  systemctl restart "roamctl@$iface"
+}
+
+cmd_tui() {
+  local iface
+  iface="$(resolve_iface "${1:-}")"
+  [[ -x $BIN_DIR/roamctl-tui ]] || fail "roamctl-tui is not installed; run: roamctl-omarchy install"
+  exec omarchy-launch-or-focus-tui --app-id=org.omarchy.roamctl-tui "$BIN_DIR/roamctl-tui" -iface "$iface"
+}
+
+cmd_config() {
+  local iface
+  iface="$(resolve_iface "${1:-}")"
+  if [[ ! -t 0 ]]; then
+    in_terminal "$SELF config $iface"
+  fi
+  [[ -f /etc/roamctl/$iface.toml ]] || fail "/etc/roamctl/$iface.toml does not exist yet; start roamctl once to create it"
+  sudoedit "/etc/roamctl/$iface.toml"
+  if systemctl is-active --quiet "roamctl@$iface"; then
+    echo "Restarting roamctl@$iface to apply changes"
+    sudo systemctl restart "roamctl@$iface"
+  fi
+}
+
+cmd_logs() {
+  local iface
+  iface="$(resolve_iface "${1:-}")"
+  exec omarchy-launch-tui --app-id=org.omarchy.roamctl-logs journalctl -u "roamctl@$iface" -f -n 200
+}
+
+case "${1:-}" in
+  install) shift; cmd_install "$@" ;;
+  uninstall) shift; cmd_uninstall ;;
+  status) shift; cmd_status "$@" ;;
+  enable) shift; cmd_enable "$@" ;;
+  disable) shift; cmd_disable "$@" ;;
+  restart) shift; cmd_restart "$@" ;;
+  tui) shift; cmd_tui "$@" ;;
+  config) shift; cmd_config "$@" ;;
+  logs) shift; cmd_logs "$@" ;;
+  *) sed -n '3,15p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
+esac

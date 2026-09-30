@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "id": "jwil007.roamctl",
+  "name": "roamctl",
+  "version": "0.1.0",
+  "author": "jwil007",
+  "license": "MIT",
+  "description": "Enable roamctl's Wi-Fi roaming daemon, watch its live roaming tier, RSSI and scored APs, and get notified when it roams.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "roamctl",
+    "description": "Wi-Fi roaming tier, live AP scores, and roamctl service control. Click: panel · Middle: TUI · Right: start/stop.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "iface": "",
+      "notifyRoams": true,
+      "candidateCount": 5
+    },
+    "schema": [
+      {
+        "key": "iface",
+        "type": "string",
+        "label": "Wireless interface",
+        "description": "Leave empty to use the first wireless interface.",
+        "defaultValue": ""
+      },
+      {
+        "key": "notifyRoams",
+        "type": "boolean",
+        "label": "Notify on roam",
+        "description": "Show a notification each time roamctl roams to another AP.",
+        "defaultValue": true
+      },
+      {
+        "key": "candidateCount",
+        "type": "integer",
+        "label": "APs to list",
+        "min": 1,
+        "max": 15,
+        "step": 1,
+        "defaultValue": 5
+      }
+    ]
+  }
+}
