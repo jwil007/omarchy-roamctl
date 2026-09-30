@@ -116,7 +116,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(400))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(640))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(760))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -197,7 +197,7 @@ Panel {
           ActionRow {
             visible: roamctl.statusKnown && !roamctl.installed
             width: parent.width
-            glyph: ""
+            glyph: "\uf019"
             title: "Install roamctl"
             subtitle: "Download the latest release from github.com/jwil007/roamctl"
             onActivated: root.run("install")
@@ -219,7 +219,7 @@ Panel {
             }
 
             PanelActionButton {
-              iconText: ""
+              iconText: "\uf120"
               tooltipText: "Open roamctl-tui (t)"
               foreground: root.foreground
               fontFamily: root.fontFamily
@@ -227,21 +227,21 @@ Panel {
               onClicked: root.run("tui")
             }
             PanelActionButton {
-              iconText: ""
+              iconText: "\uf013"
               tooltipText: "Edit config (c)"
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: root.run("config")
             }
             PanelActionButton {
-              iconText: ""
+              iconText: "\uf03a"
               tooltipText: "Follow logs (l)"
               foreground: root.foreground
               fontFamily: root.fontFamily
               onClicked: root.run("logs")
             }
             PanelActionButton {
-              iconText: ""
+              iconText: "\uf021"
               tooltipText: "Restart service (r)"
               foreground: root.foreground
               fontFamily: root.fontFamily
