@@ -217,11 +217,13 @@ Panel {
         clip: true
         boundsBehavior: Flickable.StopAtBounds
         interactive: contentHeight > height
-        ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
+        ScrollBar.vertical: ScrollBar { id: vbar; policy: ScrollBar.AsNeeded }
 
         Column {
           id: column
-          width: panelFlick.width
+          // Leave a gutter for the scrollbar so it doesn't cover the right
+          // edge of the content (e.g. the tuning fields) while scrolling.
+          width: panelFlick.width - (panelFlick.interactive ? vbar.width + Style.space(4) : 0)
           spacing: Style.space(12)
 
           PanelHero {
