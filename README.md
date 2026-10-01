@@ -17,15 +17,17 @@ Then use the switch in the panel to enable roaming.
 
 ### Dependencies
 - NetworkManager with wpa_supplicant (the Omarchy default). iwd is not supported, since roamctl uses the wpa_supplicant control interface.
-- [roamctl](https://github.com/jwil007/roamctl) itself, which this plugin does not bundle. `install` downloads the latest release from GitHub and installs it system-wide with `sudo`, as described below.
+- [roamctl](https://github.com/jwil007/roamctl) itself, which this plugin does not bundle. `install` downloads a specific roamctl release from GitHub and installs it system-wide with `sudo`, as described below.
 - `curl`, `jq`, `tar`, and `sha256sum`, all included in Omarchy.
 
 ### What install changes
-- Downloads the latest roamctl release, verifies the SHA-256 checksums, and installs `roamctl` and `roamctl-tui` to `/usr/local/bin` along with the `roamctl@.service` unit shipped in the same verified archive.
+- Downloads the roamctl release pinned in `bin/roamctl-omarchy` (currently v1.3.7) and checks each archive against the SHA-256 digest recorded there. Nothing downloaded is trusted for verification, so the plugin's own source fully determines what gets installed. It then installs `roamctl` and `roamctl-tui` to `/usr/local/bin` along with the `roamctl@.service` unit shipped in the same verified archive.
 - Adds a drop-in at `/etc/systemd/system/roamctl@.service.d/omarchy.conf` that gives the `wheel` group access to roamctl's IPC socket and config file. The socket is broadcast-only (roamctl never reads from it), and `wheel` can already sudo.
 - Adds a polkit rule at `/etc/polkit-1/rules.d/50-roamctl-omarchy.rules` that lets an active local `wheel` session start, stop, and restart `roamctl@` units without a password. It does not cover any other unit. Enabling and disabling the unit still requires authorization.
 
-Run `install` again to upgrade. If roamctl is already installed, `setup` (or **Enable quick tuning** in the panel) adds only the permissions.
+To upgrade roamctl, update the plugin (`omarchy plugin update jwil007.roamctl`), which may pin a newer release, then run `install` again. If roamctl is already installed, `setup` (or **Enable quick tuning** in the panel) adds only the permissions.
+
+Maintainers: `tools/pin-roamctl vX.Y.Z` pins a new release by downloading its archives and rewriting the version and digests in `bin/roamctl-omarchy`.
 
 ## Uninstall
 ```

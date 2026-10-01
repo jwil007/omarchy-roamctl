@@ -2,7 +2,7 @@
 
 # Omarchy glue for roamctl (https://github.com/jwil007/roamctl).
 #
-#   roamctl-omarchy install [--yes]   install/upgrade roamctl + roamctl-tui from the latest release
+#   roamctl-omarchy install [--yes]   install/upgrade roamctl + roamctl-tui to the pinned release below
 #   roamctl-omarchy setup [--yes]     (re)install the socket/config permissions drop-in and polkit rule
 #   roamctl-omarchy uninstall         remove roamctl and everything install added, then optionally
 #                                     the config, roam log, and this plugin
@@ -22,6 +22,20 @@
 set -euo pipefail
 
 REPO="jwil007/roamctl"
+
+# The roamctl release this plugin installs, and the SHA-256 of every archive
+# it may download. Downloads are checked against these digests, not against
+# anything fetched from the release, so this file alone decides what gets
+# installed. Update both together with tools/pin-roamctl <tag>.
+ROAMCTL_VERSION="v1.3.7"
+declare -A ROAMCTL_SHA256=(
+  [roamctl_amd64.tar.gz]=7e059b012736afdfedd4c2bb956bb4872e2dc29b0e39a27114fa8a183ec18583
+  [roamctl_arm64.tar.gz]=22d7ef872058391a56a0ba5b87ab495858802c77d9d6281377202d62d2fad339
+  [roamctl_arm.tar.gz]=3105bca77aab2b2f0f2610997b37d413a3313e03234b55e30e1208a9812f5f36
+  [roamctl-tui_amd64.tar.gz]=31e0192e718f7c409268a3f05ec906cf94647fd8b3b98de3d9cab0c0586a0239
+  [roamctl-tui_arm64.tar.gz]=7e9e80c8e95320341d4ebdff003abc7558f8a4fb9825a5641afda420b7e284c4
+  [roamctl-tui_arm.tar.gz]=697fd68aec53b54ba1fdbb3e3c66fa628bde7d46cb6fcfe3fa85b753e1629e9d
+)
 BIN_DIR="/usr/local/bin"
 UNIT_PATH="/etc/systemd/system/roamctl@.service"
 DROPIN_DIR="/etc/systemd/system/roamctl@.service.d"
@@ -117,7 +131,7 @@ cmd_install() {
     in_terminal "$SELF install --yes"
   fi
 
-  local arch goarch latest current tmp iface
+  local arch goarch current tmp iface
   arch="$(uname -m)"
   case "$arch" in
     x86_64) goarch=amd64 ;;
@@ -126,28 +140,28 @@ cmd_install() {
     *) fail "unsupported architecture: $arch" ;;
   esac
 
-  latest="$(curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | jq -r .tag_name)"
-  [[ -n $latest && $latest != null ]] || fail "could not look up the latest roamctl release"
   current="$(installed_version)"
-  echo "Latest roamctl: $latest${current:+ (installed: $current)}"
+  echo "Installing roamctl $ROAMCTL_VERSION${current:+ (installed: $current)}"
 
   tmp="$(mktemp -d)"
   # shellcheck disable=SC2064
   trap "rm -rf '$tmp'" EXIT
 
-  local base="https://github.com/$REPO/releases/download/$latest"
-  local name
-  curl -fsSL "$base/roamctl_${latest#v}_checksums.txt" -o "$tmp/checksums.txt"
+  local base="https://github.com/$REPO/releases/download/$ROAMCTL_VERSION"
+  local name archive digest
   for name in roamctl roamctl-tui; do
-    echo "Downloading ${name}_${goarch}.tar.gz"
-    curl -fsSL "$base/${name}_${goarch}.tar.gz" -o "$tmp/${name}_${goarch}.tar.gz"
-    (cd "$tmp" && grep " ${name}_${goarch}.tar.gz\$" checksums.txt | sha256sum -c --quiet) ||
-      fail "checksum mismatch for ${name}_${goarch}.tar.gz"
-    tar -xzf "$tmp/${name}_${goarch}.tar.gz" -C "$tmp" "$name"
+    archive="${name}_${goarch}.tar.gz"
+    digest="${ROAMCTL_SHA256[$archive]:-}"
+    [[ -n $digest ]] || fail "no pinned digest for $archive"
+    echo "Downloading $archive"
+    curl -fsSL "$base/$archive" -o "$tmp/$archive"
+    (cd "$tmp" && echo "$digest  $archive" | sha256sum -c --quiet) ||
+      fail "$archive does not match the digest pinned in this plugin"
+    tar -xzf "$tmp/$archive" -C "$tmp" "$name"
   done
-  # The unit ships inside the checksummed roamctl archive (v1.3.7+).
+  # The unit ships inside the verified roamctl archive.
   tar -xzf "$tmp/roamctl_${goarch}.tar.gz" -C "$tmp" systemd/roamctl@.service ||
-    fail "roamctl $latest archive has no systemd unit"
+    fail "roamctl $ROAMCTL_VERSION archive has no systemd unit"
 
   echo "Installing to $BIN_DIR (sudo)"
   sudo install -Dm755 "$tmp/roamctl" "$BIN_DIR/roamctl"
@@ -162,7 +176,7 @@ cmd_install() {
   fi
 
   echo
-  echo "roamctl $latest installed. Toggle it from the roamctl bar widget, or:"
+  echo "roamctl $ROAMCTL_VERSION installed. Toggle it from the roamctl bar widget, or:"
   echo "  roamctl-omarchy enable${iface:+ $iface}"
 }
 

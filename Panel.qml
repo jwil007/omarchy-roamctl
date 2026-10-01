@@ -277,7 +277,7 @@ Panel {
             width: parent.width
             glyph: "\uf019"
             title: "Install roamctl"
-            subtitle: "Download the latest release from github.com/jwil007/roamctl"
+            subtitle: "Download and verify roamctl from github.com/jwil007/roamctl"
             onActivated: root.run("install")
           }
 
