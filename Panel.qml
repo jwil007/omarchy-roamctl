@@ -495,7 +495,10 @@ Panel {
 
                   Row {
                     id: fieldRow
-                    width: parent.width
+                    // Inset by a pixel: the Flickable clips at x=0, which drops
+                    // the first field's left border at fractional scales.
+                    x: 1
+                    width: parent.width - 2
                     spacing: Style.space(8)
                     readonly property real cellWidth: (width - spacing * 2) / 3
 
