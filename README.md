@@ -33,7 +33,7 @@ Run `install` again to upgrade. If roamctl is already installed, `setup` (or **E
 ```
 This stops and disables `roamctl@` units and removes the binaries, unit file, drop-in, polkit rule, and the `~/.local/bin/roamctl-omarchy` link. It then asks whether to also delete your config (`/etc/roamctl`) and roam log (`~/.local/state/roamctl-omarchy`), which are kept by default, and whether to remove the plugin.
 
-If you already removed the plugin with `omarchy plugin remove`, roamctl is still installed. Remove it by hand:
+If you already removed the plugin with `omarchy plugin remove`, roamctl is still installed. Remove it by hand (leave out `/etc/roamctl` and `~/.local/state/roamctl-omarchy` to keep your config and roam log):
 ```
 sudo systemctl disable --now roamctl@wlp1s0   # your interface
 sudo rm -rf /usr/local/bin/roamctl /usr/local/bin/roamctl-tui /etc/systemd/system/roamctl@.service \
