@@ -2,9 +2,7 @@
 An Omarchy bar widget for [roamctl](https://github.com/jwil007/roamctl), a configurable Wi-Fi roaming service that replaces wpa_supplicant's `bgscan`. The widget shows roamctl's live state, lets you tune the main roaming parameters from the panel, and logs every roam with the scan results roamctl used to make the decision.
 
 <p>
-  <img src="docs/panel.png" alt="roamctl panel: live tier, signal graph with tier floors, scored APs, recent roams" width="400">
-  &nbsp;
-  <img src="docs/tuning.png" alt="Quick tuning: tier floors, score deltas, band preference" width="400">
+  <img src="docs/panel.png" alt="roamctl panel: live tier, signal graph with tier floors, scored APs, recent roams, and quick tuning" width="400">
 </p>
 
 ## Install
