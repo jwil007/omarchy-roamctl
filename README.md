@@ -30,18 +30,18 @@ Then use the switch in the panel to enable roaming.
 Run `install` again to upgrade. If roamctl is already installed, `setup` (or **Enable quick tuning** in the panel) adds only the permissions.
 
 ## Uninstall
-Remove roamctl and everything `install` added. Run this before removing the plugin, since the script lives in the plugin folder:
 ```
 ~/.config/omarchy/plugins/jwil007.roamctl/bin/roamctl-omarchy uninstall
 ```
-This stops and disables `roamctl@` units and removes the binaries, unit file, drop-in, polkit rule, and the `~/.local/bin/roamctl-omarchy` link. Your roamctl config in `/etc/roamctl` and the roam log in `~/.local/state/roamctl-omarchy` are kept. To remove those too:
+This stops and disables `roamctl@` units and removes the binaries, unit file, drop-in, polkit rule, and the `~/.local/bin/roamctl-omarchy` link. It then asks whether to also delete your config (`/etc/roamctl`) and roam log (`~/.local/state/roamctl-omarchy`), which are kept by default, and whether to remove the plugin.
+
+If you already removed the plugin with `omarchy plugin remove`, roamctl is still installed. Remove it by hand:
 ```
-sudo rm -rf /etc/roamctl
-rm -rf ~/.local/state/roamctl-omarchy
-```
-Then remove the plugin:
-```
-omarchy plugin remove jwil007.roamctl
+sudo systemctl disable --now roamctl@wlp1s0   # your interface
+sudo rm -rf /usr/local/bin/roamctl /usr/local/bin/roamctl-tui /etc/systemd/system/roamctl@.service \
+  /etc/systemd/system/roamctl@.service.d /etc/polkit-1/rules.d/50-roamctl-omarchy.rules /etc/roamctl
+sudo systemctl daemon-reload
+rm -rf ~/.local/bin/roamctl-omarchy ~/.local/state/roamctl-omarchy
 ```
 
 ## Features

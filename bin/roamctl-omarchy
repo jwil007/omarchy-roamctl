@@ -4,7 +4,8 @@
 #
 #   roamctl-omarchy install [--yes]   install/upgrade roamctl + roamctl-tui from the latest release
 #   roamctl-omarchy setup [--yes]     (re)install the socket/config permissions drop-in and polkit rule
-#   roamctl-omarchy uninstall         stop services, remove binaries, unit, drop-in, and polkit rule
+#   roamctl-omarchy uninstall         remove roamctl and everything install added, then optionally
+#                                     the config, roam log, and this plugin
 #   roamctl-omarchy status [iface]    JSON status for the shell plugin
 #   roamctl-omarchy enable [iface]    enable + start roamctl@iface
 #   roamctl-omarchy disable [iface]   disable + stop roamctl@iface
@@ -248,7 +249,25 @@ cmd_uninstall() {
   sudo rm -rf "$DROPIN_DIR" "$UNIT_PATH" "$POLKIT_RULE" "$BIN_DIR/roamctl" "$BIN_DIR/roamctl-tui" /run/roamctl
   rm -f "$HOME/.local/bin/roamctl-omarchy"
   sudo systemctl daemon-reload
-  echo "roamctl removed. Config in /etc/roamctl was kept."
+  echo "roamctl removed."
+
+  if gum confirm --default=false "Also delete your roamctl config ($CONFIG_DIR) and roam log?"; then
+    sudo rm -rf "$CONFIG_DIR"
+    rm -rf "$STATE_DIR"
+    echo "Config and roam log deleted."
+  else
+    echo "Config in $CONFIG_DIR and roam log in $STATE_DIR were kept."
+  fi
+
+  # Omarchy has no uninstall hook, so offer to remove the plugin from here.
+  # This deletes the folder this script lives in, so it must run last.
+  local plugin_dir plugin_id
+  plugin_dir="$(dirname "$(dirname "$SELF")")"
+  plugin_id="$(basename "$plugin_dir")"
+  if [[ $plugin_dir == "$HOME/.config/omarchy/plugins/$plugin_id" ]] &&
+    gum confirm "Also remove the $plugin_id Omarchy plugin?"; then
+    exec omarchy plugin remove "$plugin_id" --yes
+  fi
 }
 
 # systemctl asks the Omarchy polkit agent for authorization when needed.
@@ -419,5 +438,5 @@ case "${1:-}" in
   logs) shift; cmd_logs "$@" ;;
   export) shift; cmd_export "$@" ;;
   log-roam) shift; cmd_log_roam "$@" ;;
-  *) sed -n '3,20p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '3,21p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
