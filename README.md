@@ -15,6 +15,13 @@ wpa_supplicant-based Wi-Fi roaming daemon.
   channel, signal, rates, retries, a 90 s RSSI sparkline, the top scored
   APs from roamctl's candidate list, and a log of recent roams.
   Keys: `t` TUI · `c` edit config · `l` logs · `r` restart · `Enter` toggle.
+- **Tuning.** Edit tier RSSI floors, per-tier score deltas, and band
+  preference in the panel, then **Apply & restart**. Values are checked
+  against roamctl's own validation rules before anything is written, and the
+  tier floors are drawn on the signal graph. The pencil button opens the full
+  config in your editor; when you close it, the file is validated, saved,
+  and roamctl restarts. Invalid edits are never written. The previous
+  version is kept in `~/.local/state/roamctl-omarchy/`.
 - **Roam notifications.** Each completed roam posts a notification with the
   target AP, band, channel, RSSI, and roam time. Turn this off with the
   `notifyRoams` setting.
@@ -35,16 +42,24 @@ Then open the widget's panel and click **Install roamctl**, or run
 `roamctl` and `roamctl-tui` to `/usr/local/bin`, and installs the upstream
 `roamctl@.service` unit. It also adds a drop-in
 (`/etc/systemd/system/roamctl@.service.d/omarchy.conf`) that hands the IPC
-socket to the `wheel` group, so the widget and `roamctl-tui` work without
-sudo. Run it again to upgrade.
+socket and config to the `wheel` group, plus a polkit rule that lets an
+active local `wheel` session start, stop, and restart `roamctl@` units
+without a password. That way the widget, `roamctl-tui`, and quick tuning
+work without sudo. Enabling and disabling the unit still asks for
+authorization. Run `install` again to upgrade. On an existing install, run
+`roamctl-omarchy setup` (or click **Enable quick tuning**) to add just the
+permissions.
 
 roamctl needs NetworkManager/wpa_supplicant. It does not work with iwd.
 
 ## Helper
 
 ```
-roamctl-omarchy install|uninstall
+roamctl-omarchy install|setup|uninstall
 roamctl-omarchy status|enable|disable|restart|tui|config|logs [iface]
+roamctl-omarchy apply <iface> section.key=value...
+roamctl-config get|check FILE
+roamctl-config set FILE section.key=value...
 ```
 
 ## Settings (shell.json bar entry)
@@ -58,5 +73,5 @@ roamctl-omarchy status|enable|disable|restart|tui|config|logs [iface]
 ## Shell IPC
 
 ```bash
-omarchy-shell jwil007.roamctl toggle|open|close|tui|enable|disable|status
+omarchy-shell jwil007.roamctl toggle|open|close|tuning|tui|enable|disable|status
 ```

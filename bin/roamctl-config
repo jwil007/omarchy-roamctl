@@ -1,0 +1,237 @@
+#!/usr/bin/env python3
+"""Read, validate, and edit a roamctl config without disturbing its comments.
+
+    roamctl-config get FILE               JSON: {ok, writable, values, errors}
+    roamctl-config set FILE key=value...  validate, back up, write in place
+    roamctl-config check FILE             print validation errors; exit 1 if any
+
+Keys are dotted "section.key" (e.g. roaming_tiers.fair_rssi). Validation
+mirrors internal/config/validate.go in roamctl so the plugin never writes a
+file the daemon would refuse to start with.
+"""
+
+import json
+import os
+import re
+import shutil
+import sys
+import tomllib
+
+STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")), "roamctl-omarchy")
+
+# Missing keys decode to Go zero values, so validate against 0 when absent.
+SCORE = (0, 100)
+RSSI = (-128, 0)
+RANGES = {
+    "roaming_tiers.excellent_rssi": RSSI,
+    "roaming_tiers.fair_rssi": RSSI,
+    "roaming_tiers.degraded_rssi": RSSI,
+    "roaming_tiers.fair_score_delta": SCORE,
+    "roaming_tiers.degraded_score_delta": SCORE,
+    "roaming_tiers.critical_score_delta": SCORE,
+    "stability.rssi_hysteresis_up": (0, 15),
+    "stability.rssi_hysteresis_down": (0, 15),
+    "stability.tier_hysteresis": (0, 20),
+    "stability.retry_rate": (0, 100),
+    "stability.data_rate": (0, None),
+    "stability.mcs_index": (0, 13),
+    "stability.unhealthy_score_mod": SCORE,
+    "stability.rssi_smooth_window": (1, 10),
+    "timing.max_bss_ct": (1, None),
+    "score_weights.rssi": SCORE,
+    "score_weights.snr": SCORE,
+    "score_weights.band": SCORE,
+    "score_weights.channel_width": SCORE,
+    "score_weights.qbss_util": SCORE,
+    "score_weights.phy_type": SCORE,
+    "score_weights.rssi_knee": RSSI,
+    "score_weights.rssi_exponent": (0, 4),
+    "score_clamps.min_rssi": RSSI,
+    "score_clamps.max_rssi": RSSI,
+    "score_clamps.min_snr": SCORE,
+    "score_clamps.max_snr": SCORE,
+    "band_scores.2point4ghz": SCORE,
+    "band_scores.5ghz": SCORE,
+    "band_scores.6ghz": SCORE,
+    "chan_width_scores.20mhz": SCORE,
+    "chan_width_scores.40mhz": SCORE,
+    "chan_width_scores.80mhz": SCORE,
+    "chan_width_scores.160mhz": SCORE,
+    "chan_width_scores.320mhz": SCORE,
+    "phy_scores.legacy": SCORE,
+    "phy_scores.80211n": SCORE,
+    "phy_scores.80211ac": SCORE,
+    "phy_scores.80211ax": SCORE,
+    "phy_scores.80211be": SCORE,
+}
+FLOATS = {"score_weights.rssi_exponent"}
+DURATIONS = {"stability.connection_cooldown", "timing.sig_poll_interval", "timing.base_scan_interval"}
+BOOLS = {"preferences.enable_btm"}
+ORDERING = [
+    ("roaming_tiers.excellent_rssi", ">", "roaming_tiers.fair_rssi"),
+    ("roaming_tiers.fair_rssi", ">", "roaming_tiers.degraded_rssi"),
+    ("score_clamps.min_rssi", "<", "score_clamps.max_rssi"),
+    ("score_clamps.min_snr", "<", "score_clamps.max_snr"),
+]
+# Go time.ParseDuration syntax, e.g. "100ms", "1m30s".
+DURATION_RE = re.compile(r"^[+-]?((\d+(\.\d*)?|\.\d+)(ns|us|µs|μs|ms|s|m|h))+$|^0$")
+
+
+def flatten(doc):
+    out = {}
+    for section, table in doc.items():
+        if isinstance(table, dict):
+            for key, value in table.items():
+                out[f"{section}.{key}"] = value
+    return out
+
+
+def validate(text):
+    try:
+        doc = tomllib.loads(text)
+    except tomllib.TOMLDecodeError as e:
+        return [f"TOML syntax: {e}"]
+    flat = flatten(doc)
+    errors = []
+
+    for key, (lo, hi) in RANGES.items():
+        value = flat.get(key, 0)
+        allowed = (int, float) if key in FLOATS else (int,)
+        if isinstance(value, bool) or not isinstance(value, allowed):
+            errors.append(f"{key} must be {'a number' if key in FLOATS else 'an integer'}")
+            continue
+        if (lo is not None and value < lo) or (hi is not None and value > hi):
+            bound = f"{lo} to {hi}" if hi is not None else f">= {lo}"
+            errors.append(f"{key} = {value} out of range ({bound})")
+
+    for key in DURATIONS:
+        value = flat.get(key)
+        if value is not None and not (isinstance(value, str) and DURATION_RE.match(value)):
+            errors.append(f'{key} must be a duration string like "5s" or "100ms"')
+    for key in BOOLS:
+        value = flat.get(key)
+        if value is not None and not isinstance(value, bool):
+            errors.append(f"{key} must be true or false")
+
+    for a, op, b in ORDERING:
+        va, vb = flat.get(a, 0), flat.get(b, 0)
+        if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
+            if (op == ">" and not va > vb) or (op == "<" and not va < vb):
+                errors.append(f"{a} must be {'greater' if op == '>' else 'less'} than {b}")
+    return errors
+
+
+def format_value(raw, current):
+    """Format a CLI string the way the existing TOML value is typed."""
+    if isinstance(current, bool) or raw in ("true", "false"):
+        return raw.lower()
+    if isinstance(current, str):
+        return json.dumps(raw)
+    float(raw)  # raises on garbage
+    return raw
+
+
+SECTION_RE = re.compile(r"^\s*\[([^\]]+)\]\s*(#.*)?$")
+
+
+def set_values(text, changes):
+    lines = text.split("\n")
+    flat = flatten(tomllib.loads(text))
+    for dotted, raw in changes.items():
+        section, key = dotted.split(".", 1)
+        value = format_value(raw, flat.get(dotted))
+        key_re = re.compile(r"^(\s*)(" + re.escape(key) + r"|\"" + re.escape(key) + r"\")(\s*=\s*)(\"[^\"]*\"|[^#\s]+)(.*)$")
+        current, section_line, last_key_line, done = None, None, None, False
+        for i, line in enumerate(lines):
+            m = SECTION_RE.match(line)
+            if m:
+                current = m.group(1).strip()
+                if current == section:
+                    section_line = last_key_line = i
+                continue
+            if current != section:
+                continue
+            km = key_re.match(line)
+            if km:
+                lines[i] = f"{km.group(1)}{km.group(2)}{km.group(3)}{value}{km.group(5)}"
+                done = True
+                break
+            if line.strip() and not line.lstrip().startswith("#"):
+                last_key_line = i
+        if done:
+            continue
+        if section_line is None:
+            lines += ["", f"[{section}]", f"{key} = {value}"]
+        else:
+            lines.insert(last_key_line + 1, f"{key} = {value}")
+    return "\n".join(lines)
+
+
+def write_in_place(path, text):
+    # /etc/roamctl is root-owned, so rename-over isn't possible; the file
+    # itself is group-writable. Keep the previous version for manual undo.
+    os.makedirs(STATE_DIR, exist_ok=True)
+    shutil.copyfile(path, os.path.join(STATE_DIR, os.path.basename(path) + ".prev"))
+    with open(path, "r+", encoding="utf-8") as f:
+        f.seek(0)
+        f.write(text)
+        f.truncate()
+        f.flush()
+        os.fsync(f.fileno())
+
+
+def main(argv):
+    if len(argv) < 3 or argv[1] not in ("get", "set", "check"):
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    cmd, path = argv[1], argv[2]
+    try:
+        with open(path, encoding="utf-8") as f:
+            text = f.read()
+    except OSError as e:
+        print(json.dumps({"ok": False, "errors": [str(e)]}))
+        return 1
+
+    if cmd == "check":
+        errors = validate(text)
+        for e in errors:
+            print(f"  ✕ {e}")
+        return 1 if errors else 0
+
+    if cmd == "get":
+        errors = validate(text)
+        try:
+            values = flatten(tomllib.loads(text))
+        except tomllib.TOMLDecodeError:
+            values = {}
+        print(json.dumps({"ok": not errors, "writable": os.access(path, os.W_OK), "values": values, "errors": errors}))
+        return 0
+
+    changes = {}
+    for arg in argv[3:]:
+        key, sep, value = arg.partition("=")
+        if not sep or "." not in key:
+            print(json.dumps({"ok": False, "errors": [f"bad assignment: {arg}"]}))
+            return 1
+        changes[key] = value
+    try:
+        new_text = set_values(text, changes)
+    except (ValueError, tomllib.TOMLDecodeError) as e:
+        print(json.dumps({"ok": False, "errors": [str(e)]}))
+        return 1
+    errors = validate(new_text)
+    if errors:
+        print(json.dumps({"ok": False, "errors": errors}))
+        return 1
+    if new_text != text:
+        try:
+            write_in_place(path, new_text)
+        except OSError as e:
+            print(json.dumps({"ok": False, "errors": [str(e)]}))
+            return 1
+    print(json.dumps({"ok": True, "changed": new_text != text, "errors": []}))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

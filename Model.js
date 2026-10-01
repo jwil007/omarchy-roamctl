@@ -103,8 +103,9 @@ function channelText(freq, width) {
   return parts.join(" · ")
 }
 
-function rateText(mbps, mcs) {
-  var text = Number(mbps || 0) + " Mbps"
+// roamctl reports bitrates in bits per second.
+function rateText(bps, mcs) {
+  var text = Math.round(Number(bps || 0) / 1e5) / 10 + " Mbps"
   if (Number(mcs) >= 0 && mcs !== undefined && mcs !== null) text += " · MCS " + mcs
   return text
 }

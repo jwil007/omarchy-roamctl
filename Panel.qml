@@ -42,6 +42,69 @@ Panel {
     return "roamctl · " + Model.tierLabel(s.RoamingTier) + " · " + s.RSSI + " dBm"
   }
 
+  // Quick tuning: edits are staged in `draft` (only keys that differ from the
+  // file) and written together by "Apply", which restarts roamctl.
+  property bool tuningOpen: false
+  property var draft: ({})
+  readonly property var tuningGroups: [
+    { title: "Tier floors (dBm)", from: -128, to: 0, fields: [
+      { key: "roaming_tiers.excellent_rssi", label: "Excellent" },
+      { key: "roaming_tiers.fair_rssi", label: "Fair" },
+      { key: "roaming_tiers.degraded_rssi", label: "Degraded" }
+    ] },
+    { title: "Score gain needed to roam", from: 0, to: 100, fields: [
+      { key: "roaming_tiers.fair_score_delta", label: "Fair" },
+      { key: "roaming_tiers.degraded_score_delta", label: "Degraded" },
+      { key: "roaming_tiers.critical_score_delta", label: "Critical" }
+    ] },
+    { title: "Band preference", from: 0, to: 100, fields: [
+      { key: "band_scores.2point4ghz", label: "2.4 GHz" },
+      { key: "band_scores.5ghz", label: "5 GHz" },
+      { key: "band_scores.6ghz", label: "6 GHz" }
+    ] }
+  ]
+  readonly property bool dirty: Object.keys(draft).length > 0
+  readonly property string draftError: {
+    var e = valueOf("roaming_tiers.excellent_rssi")
+    var f = valueOf("roaming_tiers.fair_rssi")
+    var d = valueOf("roaming_tiers.degraded_rssi")
+    if (!(e > f)) return "Excellent must be above Fair"
+    if (!(f > d)) return "Fair must be above Degraded"
+    return ""
+  }
+  readonly property var thresholds: {
+    var c = roamctl.config
+    if (c["roaming_tiers.excellent_rssi"] === undefined) return []
+    return [
+      { value: c["roaming_tiers.excellent_rssi"], label: "E" },
+      { value: c["roaming_tiers.fair_rssi"], label: "F" },
+      { value: c["roaming_tiers.degraded_rssi"], label: "D" }
+    ]
+  }
+
+  function setTuningOpen(on) {
+    tuningOpen = on
+    if (on) Qt.callLater(function() { panelFlick.contentY = Math.max(0, panelFlick.contentHeight - panelFlick.height) })
+  }
+
+  function valueOf(key) {
+    if (draft[key] !== undefined) return draft[key]
+    var v = Number(roamctl.config[key])
+    return isFinite(v) ? v : 0
+  }
+
+  function setDraft(key, value) {
+    var next = Object.assign({}, draft)
+    if (value === Number(roamctl.config[key])) delete next[key]
+    else next[key] = value
+    draft = next
+  }
+
+  function applyDraft() {
+    if (!dirty || draftError !== "" || roamctl.applying) return
+    roamctl.applyConfig(draft)
+  }
+
   function intSetting(name, fallback, min, max) {
     var n = parseInt(String(setting(name, fallback)), 10)
     if (!isFinite(n)) n = fallback
@@ -54,6 +117,7 @@ Panel {
     else if (action === "logs") roamctl.openLogs()
     else if (action === "restart") roamctl.restart()
     else if (action === "install") roamctl.install()
+    else if (action === "setup") roamctl.setup()
     else return
     if (action !== "restart") root.close()
   }
@@ -63,7 +127,8 @@ Panel {
 
   onOpenedChanged: if (opened) {
     roamctl.refresh()
-    if (panelFlick) panelFlick.contentY = 0
+    roamctl.loadConfig()
+    if (panelFlick && !tuningOpen) panelFlick.contentY = 0
     Qt.callLater(function() { keyCatcher.forceActiveFocus() })
   }
 
@@ -73,12 +138,20 @@ Panel {
     panelOpen: root.opened
   }
 
+  Connections {
+    target: roamctl
+    function onApplyingChanged() {
+      if (!roamctl.applying && !roamctl.applyFailed) root.draft = ({})
+    }
+  }
+
   IpcHandler {
     target: root.ipcTarget
     function open(): void { root.open() }
     function close(): void { root.close() }
     function toggle(): void { root.toggle() }
     function tui(): void { roamctl.openTui() }
+    function tuning(): void { root.open(); root.setTuningOpen(true) }
     function enable(): void { roamctl.setRunning(true) }
     function disable(): void { roamctl.setRunning(false) }
     function status(): string { return root.tooltip }
@@ -289,13 +362,14 @@ Panel {
 
             Sparkline {
               width: parent.width
-              height: Style.space(56)
+              height: Style.space(72)
               values: roamctl.rssiHistory
               capacity: roamctl.historyLength
               lineColor: root.critical ? root.urgent : root.accent
               gridColor: Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12)
               labelColor: root.dim
               fontFamily: root.fontFamily
+              thresholds: root.thresholds
             }
           }
 
@@ -342,6 +416,140 @@ Panel {
                 label: Model.clockText(modelData.at) + "  " + (modelData.success ? "→ " + Model.shortBssid(modelData.bssid) : "✕ failed")
                 value: modelData.success ? modelData.durationMs + " ms" : ""
                 valueColor: modelData.success ? root.foreground : root.urgent
+              }
+            }
+          }
+
+          PanelSeparator { visible: roamctl.configExists; foreground: root.foreground }
+
+          Column {
+            id: tuningSection
+            visible: roamctl.configExists
+            width: parent.width
+            spacing: Style.space(10)
+
+            RowLayout {
+              width: parent.width
+              spacing: Style.space(6)
+
+              PanelSectionHeader {
+                Layout.fillWidth: true
+                text: (root.tuningOpen ? "▾ " : "▸ ") + "TUNING" + (root.dirty ? " · UNSAVED" : "")
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+
+                MouseArea {
+                  anchors.fill: parent
+                  cursorShape: Qt.PointingHandCursor
+                  onClicked: root.setTuningOpen(!root.tuningOpen)
+                }
+              }
+
+              PanelActionButton {
+                iconText: "\uf044"
+                tooltipText: "Edit full config · restarts roamctl when you close the editor"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                onClicked: root.run("config")
+              }
+            }
+
+            ActionRow {
+              visible: root.tuningOpen && !(roamctl.configWritable && roamctl.setupCurrent)
+              width: parent.width
+              glyph: "\uf084"
+              title: "Enable quick tuning"
+              subtitle: "One-time sudo: lets wheel edit the config and restart roamctl"
+              onActivated: root.run("setup")
+            }
+
+            Column {
+              visible: root.tuningOpen && roamctl.configWritable && roamctl.setupCurrent
+              width: parent.width
+              spacing: Style.space(10)
+
+              Repeater {
+                model: root.tuningGroups
+
+                Column {
+                  id: group
+                  required property var modelData
+                  width: parent.width
+                  spacing: Style.space(4)
+
+                  Text {
+                    textFormat: Text.PlainText
+                    text: group.modelData.title
+                    color: root.dim
+                    font.family: root.fontFamily
+                    font.pixelSize: Style.font.caption
+                  }
+
+                  Row {
+                    id: fieldRow
+                    width: parent.width
+                    spacing: Style.space(8)
+                    readonly property real cellWidth: (width - spacing * 2) / 3
+
+                    Repeater {
+                      model: group.modelData.fields
+                      NumberField {
+                        required property var modelData
+                        label: modelData.label + (root.draft[modelData.key] !== undefined ? " •" : "")
+                        from: group.modelData.from
+                        to: group.modelData.to
+                        value: root.valueOf(modelData.key)
+                        fieldWidth: fieldRow.cellWidth
+                        foreground: root.foreground
+                        accent: root.accent
+                        fontFamily: root.fontFamily
+                        fontSize: Style.font.bodySmall
+                        onModified: function(v) { root.setDraft(modelData.key, v) }
+                        // Typing into the SpinBox breaks its binding to `value`;
+                        // push Reset / reloaded values back in explicitly.
+                        onValueChanged: if (field.value !== value) field.value = value
+                      }
+                    }
+                  }
+                }
+              }
+
+              Text {
+                visible: text !== ""
+                width: parent.width
+                textFormat: Text.PlainText
+                text: root.draftError !== "" ? root.draftError : roamctl.applyMessage
+                color: root.draftError !== "" || roamctl.applyFailed ? root.urgent : root.dim
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.caption
+                wrapMode: Text.WordWrap
+              }
+
+              Row {
+                anchors.right: parent.right
+                spacing: Style.space(6)
+
+                Button {
+                  text: "Reset"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  bordered: true
+                  enabled: root.dirty && !roamctl.applying
+                  opacity: enabled ? 1 : 0.4
+                  onClicked: root.draft = ({})
+                }
+                Button {
+                  text: roamctl.applying ? "Applying…" : roamctl.running ? "Apply & restart" : "Save"
+                  fontSize: Style.font.bodySmall
+                  foreground: root.foreground
+                  fontFamily: root.fontFamily
+                  bordered: true
+                  active: root.dirty && root.draftError === ""
+                  enabled: root.dirty && root.draftError === "" && !roamctl.applying
+                  opacity: enabled ? 1 : 0.4
+                  onClicked: root.applyDraft()
+                }
               }
             }
           }

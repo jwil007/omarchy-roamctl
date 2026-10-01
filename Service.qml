@@ -13,6 +13,7 @@ Item {
   property bool panelOpen: false
 
   readonly property string helperPath: String(Qt.resolvedUrl("bin/roamctl-omarchy")).replace(/^file:\/\//, "")
+  readonly property string configToolPath: String(Qt.resolvedUrl("bin/roamctl-config")).replace(/^file:\/\//, "")
   readonly property string configuredIface: String(setting("iface", "") || "").trim()
   readonly property bool notifyRoams: setting("notifyRoams", true) === true
 
@@ -27,11 +28,22 @@ Item {
   property bool enabled: false
   property string activeState: ""
 
+  // Config (/etc/roamctl/<iface>.toml). Values are flattened "section.key".
+  property string configPath: ""
+  property bool configExists: false
+  property bool configWritable: false
+  property bool setupCurrent: false
+  property var config: ({})
+  property var configErrors: []
+  property bool applying: applyProcess.running
+  property string applyMessage: ""
+  property bool applyFailed: false
+
   // Optimistic switch state while systemctl (and possibly polkit) settles:
   // -1 follows reality, 0/1 is the pending target.
   property int _desired: -1
   readonly property bool running: _desired === -1 ? active : _desired === 1
-  readonly property bool busy: statusProcess.running || controlProcess.running
+  readonly property bool busy: controlProcess.running
   property string lastError: ""
 
   // Live IPC state
@@ -62,6 +74,7 @@ Item {
   }
 
   function install() { run(["install"]) }
+  function setup() { run(["setup"]) }
   function openTui() { run(["tui", iface]) }
   function editConfig() { run(["config", iface]) }
   function openLogs() { run(["logs", iface]) }
@@ -78,6 +91,23 @@ Item {
     controlProcess.running = true
   }
 
+  function loadConfig() {
+    if (configPath === "" || !configExists || configProcess.running) return
+    configProcess.command = [configToolPath, "get", configPath]
+    configProcess.running = true
+  }
+
+  // changes: { "roaming_tiers.fair_rssi": -67, ... }
+  function applyConfig(changes) {
+    if (applyProcess.running) return
+    var args = [helperPath, "apply", iface]
+    for (var key in changes) args.push(key + "=" + changes[key])
+    applyMessage = running ? "Applying and restarting roamctl…" : "Saving…"
+    applyFailed = false
+    applyProcess.command = args
+    applyProcess.running = true
+  }
+
   function applyStatus(raw) {
     var parsed = Model.parseStatus(raw)
     if (!parsed) return
@@ -90,6 +120,10 @@ Item {
     active = parsed.active === true
     enabled = parsed.enabled === true
     activeState = String(parsed.activeState || "")
+    configPath = String(parsed.config || "")
+    configExists = parsed.configExists === true
+    configWritable = parsed.configWritable === true
+    setupCurrent = parsed.setupCurrent === true
     if (_desired !== -1 && active === (_desired === 1)) _desired = -1
     if (!active) {
       state = null
@@ -215,6 +249,64 @@ Item {
         running = false
         root._desired = -1
       }
+    }
+  }
+
+  // Pick up edits from the advanced editor (or anywhere else) as they land.
+  FileView {
+    path: root.configExists ? root.configPath : ""
+    watchChanges: true
+    printErrors: false
+    onFileChanged: root.loadConfig()
+  }
+
+  onConfigPathChanged: loadConfig()
+  onConfigExistsChanged: loadConfig()
+
+  Timer {
+    id: applyMessageTimer
+    interval: 4000
+    onTriggered: if (!root.applyFailed) root.applyMessage = ""
+  }
+
+  Process {
+    id: configProcess
+    stdout: StdioCollector {
+      id: configOut
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      var parsed = Model.parseStatus(configOut.text)
+      if (!parsed) return
+      root.config = parsed.values || {}
+      root.configErrors = parsed.errors || []
+    }
+  }
+
+  Process {
+    id: applyProcess
+    stdout: StdioCollector {
+      id: applyOut
+      waitForEnd: true
+    }
+    stderr: StdioCollector {
+      id: applyErr
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      var parsed = Model.parseStatus(applyOut.text)
+      var errors = parsed && parsed.errors ? parsed.errors : []
+      if (exitCode === 0 && parsed && parsed.ok) {
+        root.applyFailed = false
+        root.applyMessage = !parsed.changed ? "No changes" : parsed.restarted ? "Applied · roamctl restarted" : "Saved · applies when roamctl starts"
+      } else {
+        root.applyFailed = true
+        var stderr = String(applyErr.text || "").trim()
+        root.applyMessage = errors.length > 0 ? errors.join("\n") : (stderr !== "" ? stderr.split("\n").pop() : "Apply failed")
+      }
+      applyMessageTimer.restart()
+      root.loadConfig()
+      root.refresh()
     }
   }
 

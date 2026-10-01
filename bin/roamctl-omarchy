@@ -3,13 +3,16 @@
 # Omarchy glue for roamctl (https://github.com/jwil007/roamctl).
 #
 #   roamctl-omarchy install [--yes]   install/upgrade roamctl + roamctl-tui from the latest release
-#   roamctl-omarchy uninstall         stop services, remove binaries, unit, and drop-in
+#   roamctl-omarchy setup [--yes]     (re)install the socket/config permissions drop-in and polkit rule
+#   roamctl-omarchy uninstall         stop services, remove binaries, unit, drop-in, and polkit rule
 #   roamctl-omarchy status [iface]    JSON status for the shell plugin
 #   roamctl-omarchy enable [iface]    enable + start roamctl@iface
 #   roamctl-omarchy disable [iface]   disable + stop roamctl@iface
 #   roamctl-omarchy restart [iface]   restart roamctl@iface (e.g. after a config edit)
 #   roamctl-omarchy tui [iface]       open roamctl-tui in a terminal
-#   roamctl-omarchy config [iface]    edit /etc/roamctl/<iface>.toml, then restart the service
+#   roamctl-omarchy config [iface]    edit /etc/roamctl/<iface>.toml, validate, then restart the service
+#   roamctl-omarchy apply <iface> section.key=value...
+#                                     validate + write config values, restart if running (JSON result)
 #   roamctl-omarchy logs [iface]      follow the service journal in a terminal
 #
 # When [iface] is omitted, the first wireless interface is used.
@@ -21,7 +24,12 @@ BIN_DIR="/usr/local/bin"
 UNIT_PATH="/etc/systemd/system/roamctl@.service"
 DROPIN_DIR="/etc/systemd/system/roamctl@.service.d"
 DROPIN_PATH="$DROPIN_DIR/omarchy.conf"
+POLKIT_RULE="/etc/polkit-1/rules.d/50-roamctl-omarchy.rules"
+CONFIG_DIR="/etc/roamctl"
+STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/roamctl-omarchy"
+SETUP_VERSION=2
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
+CONFIG_TOOL="$(dirname "$SELF")/roamctl-config"
 
 fail() {
   echo "roamctl-omarchy: $*" >&2
@@ -58,9 +66,11 @@ in_terminal() {
 }
 
 cmd_status() {
-  local iface active enabled version
+  local iface active enabled version setup config
   iface="$(resolve_iface "${1:-}")"
   version="$(installed_version)"
+  config="$CONFIG_DIR/$iface.toml"
+  setup="$(sed -n 's/^# roamctl-omarchy setup v\([0-9]*\)$/\1/p' "$DROPIN_PATH" 2>/dev/null || true)"
   active="$(systemctl is-active "roamctl@$iface" 2>/dev/null || true)"
   enabled="$(systemctl is-enabled "roamctl@$iface" 2>/dev/null || true)"
   jq -cn \
@@ -71,6 +81,11 @@ cmd_status() {
     --argjson unit "$([[ -f $UNIT_PATH ]] && echo true || echo false)" \
     --argjson dropin "$([[ -f $DROPIN_PATH ]] && echo true || echo false)" \
     --argjson tui "$([[ -x $BIN_DIR/roamctl-tui ]] && echo true || echo false)" \
+    --arg config "$config" \
+    --argjson configExists "$([[ -f $config ]] && echo true || echo false)" \
+    --argjson configWritable "$([[ -w $config ]] && echo true || echo false)" \
+    --argjson setup "${setup:-0}" \
+    --argjson setupWanted "$SETUP_VERSION" \
     '{
       iface: $iface,
       installed: ($version != "" and $unit),
@@ -79,7 +94,11 @@ cmd_status() {
       socketAccess: $dropin,
       active: ($active == "active"),
       activeState: $active,
-      enabled: ($enabled == "enabled")
+      enabled: ($enabled == "enabled"),
+      config: $config,
+      configExists: $configExists,
+      configWritable: $configWritable,
+      setupCurrent: ($setup >= $setupWanted)
     }'
 }
 
@@ -118,22 +137,11 @@ cmd_install() {
   done
   curl -fsSL "https://raw.githubusercontent.com/$REPO/$latest/systemd/roamctl@.service" -o "$tmp/roamctl@.service"
 
-  # Upstream binds the IPC socket as root with mode 0755, so only root can
-  # read it. Hand it to the wheel group so the bar widget and roamctl-tui work
-  # without sudo. The socket is broadcast-only: roamctl never reads from it.
-  cat >"$tmp/omarchy.conf" <<'EOF'
-# Installed by the jwil007.roamctl Omarchy plugin.
-[Service]
-ExecStartPre=-/usr/bin/rm -f /run/roamctl/%i.sock
-ExecStartPost=/bin/sh -c 'for n in $$(seq 100); do if [ -S /run/roamctl/%i.sock ]; then chgrp wheel /run/roamctl/%i.sock && chmod 0660 /run/roamctl/%i.sock; exit 0; fi; sleep 0.1; done; exit 0'
-EOF
-
   echo "Installing to $BIN_DIR (sudo)"
   sudo install -Dm755 "$tmp/roamctl" "$BIN_DIR/roamctl"
   sudo install -Dm755 "$tmp/roamctl-tui" "$BIN_DIR/roamctl-tui"
   sudo install -Dm644 "$tmp/roamctl@.service" "$UNIT_PATH"
-  sudo install -Dm644 "$tmp/omarchy.conf" "$DROPIN_PATH"
-  sudo systemctl daemon-reload
+  install_permissions "$tmp"
 
   iface="$(default_iface)"
   if [[ -n $iface ]] && systemctl is-active --quiet "roamctl@$iface"; then
@@ -146,6 +154,63 @@ EOF
   echo "  roamctl-omarchy enable${iface:+ $iface}"
 }
 
+# Upstream creates the IPC socket and config as root-only. The drop-in hands
+# both to the wheel group (who can already sudo) so the bar widget,
+# roamctl-tui, and quick tuning work without a password. The socket is
+# broadcast-only: roamctl never reads from it. The config is read once at
+# startup, so writing it while roamctl runs is safe; a restart applies it.
+write_dropin() {
+  cat >"$1" <<EOF
+# Installed by the jwil007.roamctl Omarchy plugin.
+# roamctl-omarchy setup v$SETUP_VERSION
+[Service]
+ExecStartPre=-/usr/bin/rm -f /run/roamctl/%i.sock
+ExecStartPost=/bin/sh -c 'for n in \$\$(seq 100); do if [ -S /run/roamctl/%i.sock ]; then chgrp wheel /run/roamctl/%i.sock && chmod 0660 /run/roamctl/%i.sock; [ -f $CONFIG_DIR/%i.toml ] && chgrp wheel $CONFIG_DIR/%i.toml && chmod 0664 $CONFIG_DIR/%i.toml; exit 0; fi; sleep 0.1; done; exit 0'
+EOF
+}
+
+# Lets an active local wheel session start/stop/restart roamctl@ units
+# without a password prompt. Enabling/disabling (unit files) still prompts.
+write_polkit_rule() {
+  cat >"$1" <<'EOF'
+// Installed by the jwil007.roamctl Omarchy plugin.
+polkit.addRule(function(action, subject) {
+  if (action.id == "org.freedesktop.systemd1.manage-units" &&
+      subject.isInGroup("wheel") && subject.local && subject.active) {
+    var unit = action.lookup("unit") || "";
+    if (unit.indexOf("roamctl@") == 0) return polkit.Result.YES;
+  }
+});
+EOF
+}
+
+install_permissions() {
+  local tmp="$1" config
+  write_dropin "$tmp/omarchy.conf"
+  write_polkit_rule "$tmp/roamctl-omarchy.rules"
+  sudo install -Dm644 "$tmp/omarchy.conf" "$DROPIN_PATH"
+  sudo install -Dm644 "$tmp/roamctl-omarchy.rules" "$POLKIT_RULE"
+  for config in "$CONFIG_DIR"/*.toml; do
+    [[ -f $config ]] || continue
+    sudo chgrp wheel "$config"
+    sudo chmod 0664 "$config"
+  done
+  sudo systemctl daemon-reload
+}
+
+cmd_setup() {
+  if [[ ${1:-} != --yes && ! -t 0 ]]; then
+    in_terminal "$SELF setup --yes"
+  fi
+  local tmp
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" EXIT
+  echo "Granting the wheel group access to roamctl's socket and config (sudo)"
+  install_permissions "$tmp"
+  echo "Done. Quick tuning in the roamctl panel is ready."
+}
+
 cmd_uninstall() {
   if [[ ! -t 0 ]]; then
     in_terminal "$SELF uninstall"
@@ -156,7 +221,7 @@ cmd_uninstall() {
     # shellcheck disable=SC2086
     sudo systemctl disable --now $units
   fi
-  sudo rm -rf "$DROPIN_DIR" "$UNIT_PATH" "$BIN_DIR/roamctl" "$BIN_DIR/roamctl-tui" /run/roamctl
+  sudo rm -rf "$DROPIN_DIR" "$UNIT_PATH" "$POLKIT_RULE" "$BIN_DIR/roamctl" "$BIN_DIR/roamctl-tui" /run/roamctl
   sudo systemctl daemon-reload
   echo "roamctl removed. Config in /etc/roamctl was kept."
 }
@@ -187,18 +252,98 @@ cmd_tui() {
   exec omarchy-launch-or-focus-tui --app-id=org.omarchy.roamctl-tui "$BIN_DIR/roamctl-tui" -iface "$iface"
 }
 
+backup_config() {
+  mkdir -p "$STATE_DIR"
+  cp "$1" "$STATE_DIR/$(basename "$1").prev"
+}
+
+# Restart if running and report whether it came back up.
+restart_if_active() {
+  local iface="$1" n
+  systemctl is-active --quiet "roamctl@$iface" || return 2
+  systemctl restart "roamctl@$iface" || return 1
+  for n in 1 2 3 4 5 6; do
+    sleep 0.5
+    systemctl is-active --quiet "roamctl@$iface" && return 0
+  done
+  return 1
+}
+
+# Terminal editors run inline; GUI editors need their wait flag so we know
+# when the file is closed.
+edit_file() {
+  local editor
+  editor="$(cat "$HOME/.local/state/omarchy/defaults/editor" 2>/dev/null || echo nvim)"
+  case "${editor##*/}" in
+    nvim | vim | nano | micro | hx | helix) "$editor" "$1" ;;
+    code | cursor | zed | subl) "$editor" --wait "$1" ;;
+    *) nvim "$1" ;;
+  esac
+}
+
 cmd_config() {
-  local iface
+  local iface file tmp answer status
   iface="$(resolve_iface "${1:-}")"
   if [[ ! -t 0 ]]; then
     in_terminal "$SELF config $iface"
   fi
-  [[ -f /etc/roamctl/$iface.toml ]] || fail "/etc/roamctl/$iface.toml does not exist yet; start roamctl once to create it"
-  sudoedit "/etc/roamctl/$iface.toml"
-  if systemctl is-active --quiet "roamctl@$iface"; then
-    echo "Restarting roamctl@$iface to apply changes"
-    sudo systemctl restart "roamctl@$iface"
+  file="$CONFIG_DIR/$iface.toml"
+  [[ -f $file ]] || fail "$file does not exist yet; start roamctl once to create it"
+
+  # Edit a copy so a half-finished or invalid file never lands in /etc.
+  tmp="$(mktemp --suffix=.toml)"
+  # shellcheck disable=SC2064
+  trap "rm -f '$tmp'" EXIT
+  cp "$file" "$tmp"
+  while true; do
+    edit_file "$tmp"
+    if cmp -s "$file" "$tmp"; then
+      echo "No changes."
+      return
+    fi
+    if "$CONFIG_TOOL" check "$tmp"; then
+      break
+    fi
+    read -rp "Config is invalid. [e]dit again or [d]iscard? " answer
+    [[ $answer == [dD]* ]] && { echo "Discarded."; return; }
+  done
+
+  backup_config "$file"
+  if [[ -w $file ]]; then
+    cat "$tmp" >"$file"
+  else
+    sudo tee "$file" <"$tmp" >/dev/null
   fi
+  echo "Saved $file"
+
+  status=0
+  restart_if_active "$iface" || status=$?
+  case $status in
+    0) echo "roamctl@$iface restarted with the new config." ;;
+    2) echo "roamctl@$iface is not running; changes apply next time it starts." ;;
+    *) echo "roamctl@$iface failed to restart:"; journalctl -u "roamctl@$iface" -n 15 --no-pager -o cat ;;
+  esac
+}
+
+cmd_apply() {
+  local iface file result status
+  iface="$(resolve_iface "${1:-}")"
+  shift || true
+  file="$CONFIG_DIR/$iface.toml"
+  [[ -w $file ]] || fail "$file is not writable; run: roamctl-omarchy setup"
+  result="$("$CONFIG_TOOL" set "$file" "$@")" || { echo "$result"; exit 1; }
+
+  status=2
+  if [[ $(jq -r .changed <<<"$result") == true ]]; then
+    status=0
+    restart_if_active "$iface" 2>/dev/null || status=$?
+  fi
+  jq -c --argjson status "$status" '. + {
+    restarted: ($status == 0 and .changed),
+    ok: (.ok and $status != 1),
+    errors: (.errors + (if $status == 1 then ["roamctl failed to restart; check the logs"] else [] end))
+  }' <<<"$result"
+  [[ $status != 1 ]]
 }
 
 cmd_logs() {
@@ -209,6 +354,8 @@ cmd_logs() {
 
 case "${1:-}" in
   install) shift; cmd_install "$@" ;;
+  setup) shift; cmd_setup "$@" ;;
+  apply) shift; cmd_apply "$@" ;;
   uninstall) shift; cmd_uninstall ;;
   status) shift; cmd_status "$@" ;;
   enable) shift; cmd_enable "$@" ;;
@@ -217,5 +364,5 @@ case "${1:-}" in
   tui) shift; cmd_tui "$@" ;;
   config) shift; cmd_config "$@" ;;
   logs) shift; cmd_logs "$@" ;;
-  *) sed -n '3,15p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  *) sed -n '3,19p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
