@@ -193,6 +193,18 @@ polkit.addRule(function(action, subject) {
 EOF
 }
 
+# Put roamctl-omarchy on PATH (~/.local/bin) so the commands in the README
+# work as written. Plugins can't run install hooks, so install/setup do it.
+link_helper() {
+  local bin="$HOME/.local/bin"
+  mkdir -p "$bin"
+  ln -sfn "$SELF" "$bin/roamctl-omarchy"
+  case ":$PATH:" in
+    *":$bin:"*) ;;
+    *) echo "Note: $bin is not on PATH; run $SELF directly." ;;
+  esac
+}
+
 install_permissions() {
   local tmp="$1" config
   write_dropin "$tmp/omarchy.conf"
@@ -205,6 +217,7 @@ install_permissions() {
     sudo chmod 0664 "$config"
   done
   sudo systemctl daemon-reload
+  link_helper
 }
 
 cmd_setup() {
@@ -231,6 +244,7 @@ cmd_uninstall() {
     sudo systemctl disable --now $units
   fi
   sudo rm -rf "$DROPIN_DIR" "$UNIT_PATH" "$POLKIT_RULE" "$BIN_DIR/roamctl" "$BIN_DIR/roamctl-tui" /run/roamctl
+  rm -f "$HOME/.local/bin/roamctl-omarchy"
   sudo systemctl daemon-reload
   echo "roamctl removed. Config in /etc/roamctl was kept."
 }

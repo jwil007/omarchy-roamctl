@@ -78,6 +78,8 @@ Roams are logged whenever the Omarchy shell is running, including when the panel
 > Roams requested by the AP through 802.11v BSS Transition Management are not scored by roamctl, so score deltas will not explain them.
 
 ## Reference
+`install` and `setup` link `roamctl-omarchy` into `~/.local/bin`. Before that, run it from `~/.config/omarchy/plugins/jwil007.roamctl/bin/`.
+
 ```
 roamctl-omarchy install|setup|uninstall
 roamctl-omarchy status|enable|disable|restart|tui|config|logs|export [iface]
