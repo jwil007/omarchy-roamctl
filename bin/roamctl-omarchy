@@ -144,12 +144,14 @@ cmd_install() {
       fail "checksum mismatch for ${name}_${goarch}.tar.gz"
     tar -xzf "$tmp/${name}_${goarch}.tar.gz" -C "$tmp" "$name"
   done
-  curl -fsSL "https://raw.githubusercontent.com/$REPO/$latest/systemd/roamctl@.service" -o "$tmp/roamctl@.service"
+  # The unit ships inside the checksummed roamctl archive (v1.3.7+).
+  tar -xzf "$tmp/roamctl_${goarch}.tar.gz" -C "$tmp" systemd/roamctl@.service ||
+    fail "roamctl $latest archive has no systemd unit"
 
   echo "Installing to $BIN_DIR (sudo)"
   sudo install -Dm755 "$tmp/roamctl" "$BIN_DIR/roamctl"
   sudo install -Dm755 "$tmp/roamctl-tui" "$BIN_DIR/roamctl-tui"
-  sudo install -Dm644 "$tmp/roamctl@.service" "$UNIT_PATH"
+  sudo install -Dm644 "$tmp/systemd/roamctl@.service" "$UNIT_PATH"
   install_permissions "$tmp"
 
   iface="$(default_iface)"

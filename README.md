@@ -17,14 +17,32 @@ Open the widget and click **Install roamctl**, or run:
 ```
 Then use the switch in the panel to enable roaming.
 
-Requires NetworkManager with wpa_supplicant. iwd is not supported, since roamctl uses the wpa_supplicant control interface.
+### Dependencies
+- NetworkManager with wpa_supplicant (the Omarchy default). iwd is not supported, since roamctl uses the wpa_supplicant control interface.
+- [roamctl](https://github.com/jwil007/roamctl) itself, which this plugin does not bundle. `install` downloads the latest release from GitHub and installs it system-wide with `sudo`, as described below.
+- `curl`, `jq`, `tar`, and `sha256sum`, all included in Omarchy.
 
 ### What install changes
-- Downloads the latest roamctl release, verifies the SHA-256 checksums, and installs `roamctl` and `roamctl-tui` to `/usr/local/bin` along with the upstream `roamctl@.service` unit.
+- Downloads the latest roamctl release, verifies the SHA-256 checksums, and installs `roamctl` and `roamctl-tui` to `/usr/local/bin` along with the `roamctl@.service` unit shipped in the same verified archive.
 - Adds a drop-in at `/etc/systemd/system/roamctl@.service.d/omarchy.conf` that gives the `wheel` group access to roamctl's IPC socket and config file. The socket is broadcast-only (roamctl never reads from it), and `wheel` can already sudo.
 - Adds a polkit rule at `/etc/polkit-1/rules.d/50-roamctl-omarchy.rules` that lets an active local `wheel` session start, stop, and restart `roamctl@` units without a password. It does not cover any other unit. Enabling and disabling the unit still requires authorization.
 
-Run `install` again to upgrade. If roamctl is already installed, `setup` (or **Enable quick tuning** in the panel) adds only the permissions. `uninstall` removes everything except your config.
+Run `install` again to upgrade. If roamctl is already installed, `setup` (or **Enable quick tuning** in the panel) adds only the permissions.
+
+## Uninstall
+Remove roamctl and everything `install` added. Run this before removing the plugin, since the script lives in the plugin folder:
+```
+~/.config/omarchy/plugins/jwil007.roamctl/bin/roamctl-omarchy uninstall
+```
+This stops and disables `roamctl@` units and removes the binaries, unit file, drop-in, polkit rule, and the `~/.local/bin/roamctl-omarchy` link. Your roamctl config in `/etc/roamctl` and the roam log in `~/.local/state/roamctl-omarchy` are kept. To remove those too:
+```
+sudo rm -rf /etc/roamctl
+rm -rf ~/.local/state/roamctl-omarchy
+```
+Then remove the plugin:
+```
+omarchy plugin remove jwil007.roamctl
+```
 
 ## Features
 
