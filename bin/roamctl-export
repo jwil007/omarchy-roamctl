@@ -1,0 +1,181 @@
+#!/usr/bin/env python3
+"""Flatten the roam log into a CSV: one row per candidate AP per roam.
+
+    roamctl-export LOG.jsonl [LOG.jsonl...] -o OUT.csv
+
+Roam-level columns repeat on every candidate row, so the file can be
+filtered or pivoted directly in a spreadsheet or pandas (group by roam_id).
+The candidate list is the scored scan list from the last frame roamctl
+published before the roam started.
+
+roamctl's decision rule (checkRoam in roam.go): the top-scored candidate is
+tried if its score beats the current AP's by at least the tier's required
+delta; RSSI hysteresis blocks this unless the gap is at least 2x the fair
+delta. APs with recent roam failures are filtered out before scoring and are
+listed in `penalized_bssids`.
+"""
+
+import csv
+import json
+import sys
+
+ROAM_COLUMNS = [
+    "roam_id", "roam_completed_at", "result", "result_flag", "message", "roam_duration_ms",
+    "iface", "ssid",
+    "tier_at_decision", "required_delta", "hysteresis_override_delta", "hysteresis_active",
+    "last_trigger_rssi", "unhealthy_conn", "decision_snapshot_age_ms",
+    "from_bssid", "from_band", "from_channel", "from_channel_width", "from_rssi", "from_avg_rssi",
+    "from_score", "from_retry_rate", "from_tx_mbps", "from_tx_mcs", "from_rx_mbps", "from_rx_mcs",
+    "from_beacon_loss", "from_conn_duration_s",
+    "scan_mode", "last_scan_time", "bss_list_stable", "candidate_count",
+    "target_bssid", "final_bssid", "landed_on_target",
+    "to_band", "to_channel", "to_channel_width", "to_rssi",
+    "penalized_bssids",
+]
+CANDIDATE_COLUMNS = [
+    "cand_rank", "cand_bssid", "cand_is_current", "cand_is_target",
+    "cand_band", "cand_channel", "cand_freq", "cand_channel_width", "cand_phy",
+    "cand_rssi", "cand_snr", "cand_noise", "cand_qbss_util", "cand_clients", "cand_est_throughput",
+    "cand_scan_age_ms", "cand_flags",
+    "cand_final_score", "cand_rssi_score", "cand_snr_score", "cand_band_score",
+    "cand_cw_score", "cand_util_score", "cand_phy_score",
+    "cand_delta_vs_current", "cand_meets_required_delta",
+]
+
+
+def mbps(bps):
+    return round((bps or 0) / 1e6, 1)
+
+
+def roam_fields(index, rec):
+    roam = rec.get("roam") or {}
+    decision = rec.get("decision") or {}
+    before = decision.get("connection") or {}
+    after = rec.get("after") or {}
+    bss = decision.get("bssList") or []
+    current = next((b for b in bss if b.get("IsCurrentAP")), None)
+    final = roam.get("finalBssid") or ""
+    target = roam.get("targetBssid") or ""
+    return {
+        "roam_id": index,
+        "roam_completed_at": roam.get("completedAt", ""),
+        "result": "success" if roam.get("success") else "failure",
+        "result_flag": roam.get("resultFlag", ""),
+        "message": roam.get("message", ""),
+        "roam_duration_ms": roam.get("durationMs", ""),
+        "iface": rec.get("iface", ""),
+        "ssid": rec.get("ssid", ""),
+        "tier_at_decision": decision.get("tier", ""),
+        "required_delta": decision.get("requiredDelta", ""),
+        "hysteresis_override_delta": decision.get("hysteresisOverrideDelta", ""),
+        "hysteresis_active": before.get("hysteresisActive", ""),
+        "last_trigger_rssi": before.get("lastTriggerRssi", ""),
+        "unhealthy_conn": before.get("unhealthyConn", ""),
+        "decision_snapshot_age_ms": decision.get("snapshotAgeMs", ""),
+        "from_bssid": before.get("bssid", ""),
+        "from_band": before.get("band", ""),
+        "from_channel": before.get("channel", ""),
+        "from_channel_width": before.get("channelWidth", ""),
+        "from_rssi": before.get("rssi", ""),
+        "from_avg_rssi": before.get("avgRssi", ""),
+        "from_score": current.get("FinalScore", "") if current else "",
+        "from_retry_rate": before.get("retryRate", ""),
+        "from_tx_mbps": mbps(before.get("txBitrate")) if before else "",
+        "from_tx_mcs": before.get("txMcs", ""),
+        "from_rx_mbps": mbps(before.get("rxBitrate")) if before else "",
+        "from_rx_mcs": before.get("rxMcs", ""),
+        "from_beacon_loss": before.get("beaconLoss", ""),
+        "from_conn_duration_s": round(before.get("connDurationMs", 0) / 1000, 1) if before else "",
+        "scan_mode": before.get("scanMode", ""),
+        "last_scan_time": before.get("lastScanTime", ""),
+        "bss_list_stable": before.get("bssListStable", ""),
+        "candidate_count": len(bss),
+        "target_bssid": target,
+        "final_bssid": final,
+        "landed_on_target": bool(final) and final.lower() == target.lower(),
+        "to_band": after.get("band", ""),
+        "to_channel": after.get("channel", ""),
+        "to_channel_width": after.get("channelWidth", ""),
+        "to_rssi": after.get("rssi", ""),
+        "penalized_bssids": " ".join(p.get("BSSID", "") for p in rec.get("penalties") or []),
+    }, bss, current, target
+
+
+def candidate_fields(rank, b, current, target, required):
+    delta = b.get("FinalScore", 0) - current.get("FinalScore", 0) if current else ""
+    return {
+        "cand_rank": rank,
+        "cand_bssid": b.get("BSSID", ""),
+        "cand_is_current": bool(b.get("IsCurrentAP")),
+        "cand_is_target": b.get("BSSID", "").lower() == target.lower() and target != "",
+        "cand_band": b.get("Band", ""),
+        "cand_channel": b.get("ChannelNum", ""),
+        "cand_freq": b.get("Freq", ""),
+        "cand_channel_width": b.get("ChannelWidth", ""),
+        "cand_phy": b.get("PHYType", ""),
+        "cand_rssi": b.get("RSSI", ""),
+        "cand_snr": b.get("SNR", ""),
+        "cand_noise": b.get("Noise", ""),
+        "cand_qbss_util": b.get("QBSSUtil", ""),
+        "cand_clients": b.get("QBSSStaCt", ""),
+        "cand_est_throughput": b.get("EstThruput", ""),
+        "cand_scan_age_ms": round(b.get("Age", 0) / 1e6) if "Age" in b else "",
+        "cand_flags": b.get("Flags", ""),
+        "cand_final_score": b.get("FinalScore", ""),
+        "cand_rssi_score": b.get("RssiScore", ""),
+        "cand_snr_score": b.get("SnrScore", ""),
+        "cand_band_score": b.get("BandScore", ""),
+        "cand_cw_score": b.get("CwScore", ""),
+        "cand_util_score": b.get("UtilScore", ""),
+        "cand_phy_score": b.get("PhyScore", ""),
+        "cand_delta_vs_current": delta,
+        "cand_meets_required_delta": (delta >= required) if delta != "" and isinstance(required, (int, float)) and not b.get("IsCurrentAP") else "",
+    }
+
+
+def main(argv):
+    if "-o" not in argv or argv.index("-o") == len(argv) - 1:
+        print(__doc__.strip(), file=sys.stderr)
+        return 2
+    out = argv[argv.index("-o") + 1]
+    logs = [a for i, a in enumerate(argv[1:], 1) if a != "-o" and argv[i - 1] != "-o"]
+
+    records = []
+    for path in logs:
+        try:
+            with open(path, encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if line:
+                        try:
+                            records.append(json.loads(line))
+                        except json.JSONDecodeError:
+                            pass
+        except FileNotFoundError:
+            pass
+    if not records:
+        print("No roams logged yet.", file=sys.stderr)
+        return 1
+
+    records.sort(key=lambda r: (r.get("roam") or {}).get("completedAt", ""))
+    rows = 0
+    with open(out, "w", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=ROAM_COLUMNS + CANDIDATE_COLUMNS)
+        writer.writeheader()
+        for index, rec in enumerate(records, 1):
+            roam, bss, current, target = roam_fields(index, rec)
+            required = (rec.get("decision") or {}).get("requiredDelta")
+            ranked = sorted(bss, key=lambda b: -b.get("FinalScore", 0))
+            if not ranked:
+                writer.writerow(roam)
+                rows += 1
+            for rank, b in enumerate(ranked, 1):
+                writer.writerow({**roam, **candidate_fields(rank, b, current, target, required)})
+                rows += 1
+    print(f"{len(records)} roams, {rows} rows", file=sys.stderr)
+    print(out)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))

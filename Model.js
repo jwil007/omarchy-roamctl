@@ -163,3 +163,85 @@ function clockText(date) {
   function pad(n) { return n < 10 ? "0" + n : String(n) }
   return pad(d.getHours()) + ":" + pad(d.getMinutes()) + ":" + pad(d.getSeconds())
 }
+
+// Score delta roamctl requires in each tier (checkRoam in roam.go).
+var TIER_DELTA_KEYS = {
+  opportunistic: "roaming_tiers.fair_score_delta",
+  active_roaming: "roaming_tiers.degraded_score_delta",
+  critical: "roaming_tiers.critical_score_delta"
+}
+
+function connSnapshot(s) {
+  if (!s) return null
+  return {
+    bssid: s.BSSID || "",
+    freq: s.Freq || 0,
+    channel: channelFor(s.Freq),
+    band: bandFor(s.Freq),
+    channelWidth: s.ChannelWidth || "",
+    rssi: s.RSSI || 0,
+    avgRssi: s.AvgRSSI || 0,
+    avgRssiBeacon: s.AvgRSSIBeacon || 0,
+    txBitrate: s.TxBitrate || 0,
+    txMcs: s.TxMCS,
+    txPhy: s.TxPHY || "",
+    rxBitrate: s.RxBitrate || 0,
+    rxMcs: s.RxMCS,
+    rxPhy: s.RxPHY || "",
+    retryRate: s.RetryRate || 0,
+    txRetries: s.TxRetries || 0,
+    txFails: s.TxFails || 0,
+    beaconLoss: s.BeaconLoss || 0,
+    connDurationMs: durationMs(s.ConnDuration),
+    wpaState: s.WPAState || "",
+    tier: s.RoamingTier || "",
+    resultFlag: s.RoamResultFlag || "",
+    lastTriggerRssi: s.LastTriggerRSSI || 0,
+    hysteresisActive: s.HysteresisActive === true,
+    unhealthyConn: s.UnhealthyConn === true,
+    entryScanned: s.EntryScanned === true,
+    entryScannedCrit: s.EntryScannedCrit === true,
+    fullScannedCrit: s.FullScannedCrit === true,
+    scanMode: s.ScanMode || "",
+    scanInProgress: s.ScanInProgress === true,
+    scanDurationMs: durationMs(s.ScanDuration),
+    lastScanTime: isZeroTime(s.LastScanTime) ? "" : s.LastScanTime,
+    bssListStable: s.BSSListStable === true
+  }
+}
+
+// One roam, as logged to roams-<iface>.jsonl and expanded by roamctl-export.
+// `before` is the last frame published before the roam started; its BSSList
+// is the scored scan list the target was chosen from.
+function roamRecord(after, before, decisionAgeMs, nowMs, config, penalties) {
+  var cfg = config || {}
+  var tier = before ? before.RoamingTier : ""
+  var deltaKey = TIER_DELTA_KEYS[tier]
+  return {
+    schema: 1,
+    loggedAt: new Date(nowMs).toISOString(),
+    iface: after.Iface || "",
+    ssid: after.SSID || (before ? before.SSID : "") || "",
+    roam: {
+      completedAt: after.CompletedAt,
+      success: after.Success === true,
+      resultFlag: after.RoamResultFlag || "",
+      message: after.Message || "",
+      targetBssid: after.TargetBSSID || "",
+      finalBssid: after.FinalBSSID || "",
+      durationMs: durationMs(after.Duration)
+    },
+    decision: {
+      // How long before the roam landed we last saw a pre-roam frame.
+      snapshotAgeMs: decisionAgeMs,
+      tier: tier,
+      requiredDelta: deltaKey && cfg[deltaKey] !== undefined ? cfg[deltaKey] : null,
+      hysteresisOverrideDelta: cfg["roaming_tiers.fair_score_delta"] !== undefined ? cfg["roaming_tiers.fair_score_delta"] * 2 : null,
+      connection: connSnapshot(before),
+      bssList: before && Array.isArray(before.BSSList) ? before.BSSList : []
+    },
+    after: connSnapshot(after),
+    penalties: penalties || [],
+    config: cfg
+  }
+}

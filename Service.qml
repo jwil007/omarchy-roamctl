@@ -48,13 +48,19 @@ Item {
 
   // Live IPC state
   readonly property string socketPath: iface !== "" ? "/run/roamctl/" + iface + ".sock" : ""
-  readonly property bool streaming: socket.connected && state !== null
+  readonly property bool streaming: state !== null
   property var state: null
   property var rssiHistory: []
   property var roams: []
   readonly property int historyLength: 90
 
   property string _pendingLine: ""
+  property string _decisionLine: ""
+  property double _decisionSeenAt: 0
+  readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/roamctl-omarchy"
+  readonly property string roamLogPath: iface !== "" ? stateDir + "/roams-" + iface + ".jsonl" : ""
+  property int roamsLogged: 0
+  property bool exporting: exportProcess.running
   property string _lastRoamAt: ""
   property bool _roamBaseline: false
 
@@ -124,6 +130,7 @@ Item {
     configExists = parsed.configExists === true
     configWritable = parsed.configWritable === true
     setupCurrent = parsed.setupCurrent === true
+    roamsLogged = Number(parsed.roamsLogged || 0)
     if (_desired !== -1 && active === (_desired === 1)) _desired = -1
     if (!active) {
       state = null
@@ -138,10 +145,35 @@ Item {
     if (_pendingLine === "") return
     var next = Model.parseState(_pendingLine)
     _pendingLine = ""
-    if (!next) return
-    state = next
-    detectRoam(next)
+    if (next) state = next
   }
+
+  // Runs for every ~100 ms frame, so it only does cheap string checks; frames
+  // are fully parsed just for the UI tick above or when a roam lands. The last
+  // frame published before a roam started is kept as the decision snapshot:
+  // it holds the scored scan list roamctl chose the target from.
+  function handleFrame(line) {
+    _lastFrameAt = Date.now()
+    _pendingLine = line
+    var m = completedRe.exec(line)
+    var completedAt = m && !Model.isZeroTime(m[1]) ? m[1] : ""
+    // The first frame after (re)connecting carries whatever roam happened
+    // before we attached; remember it without announcing it.
+    if (!_roamBaseline) {
+      _roamBaseline = true
+      _lastRoamAt = completedAt
+    } else if (completedAt !== "" && completedAt !== _lastRoamAt) {
+      _lastRoamAt = completedAt
+      recordRoam(_decisionLine, _decisionSeenAt, line)
+    }
+    if (!inProgressRe.test(line)) {
+      _decisionLine = line
+      _decisionSeenAt = Date.now()
+    }
+  }
+
+  readonly property var completedRe: /"CompletedAt":\s*"([^"]*)"/
+  readonly property var inProgressRe: /"RoamInProgress":\s*true/
 
   function pushRssi(rssi) {
     if (!rssi) return
@@ -150,28 +182,23 @@ Item {
     rssiHistory = next
   }
 
-  function detectRoam(s) {
-    var completedAt = Model.isZeroTime(s.CompletedAt) ? "" : String(s.CompletedAt)
-    // The first frame after (re)connecting carries whatever roam happened
-    // before we attached; remember it without announcing it.
-    if (!_roamBaseline) {
-      _roamBaseline = true
-      _lastRoamAt = completedAt
-      return
-    }
-    if (completedAt === "" || completedAt === _lastRoamAt) return
-    _lastRoamAt = completedAt
+  function recordRoam(decisionLine, decisionSeenAt, resultLine) {
+    var s = Model.parseState(resultLine)
+    if (!s) return
+    var before = Model.parseState(decisionLine)
+    var now = Date.now()
 
-    var target = Model.findBss(s.BSSList, s.FinalBSSID || s.TargetBSSID)
+    var target = Model.findBss(before ? before.BSSList : [], s.TargetBSSID) || Model.findBss(s.BSSList, s.FinalBSSID || s.TargetBSSID)
     var entry = {
-      at: new Date(),
+      at: new Date(now),
       success: s.Success === true,
       bssid: String(s.FinalBSSID || s.TargetBSSID || ""),
       durationMs: Model.durationMs(s.Duration),
       summary: Model.roamSummary(s, target),
-      tier: Model.tierLabel(s.RoamingTier)
+      tier: Model.tierLabel(before ? before.RoamingTier : s.RoamingTier)
     }
     roams = [entry].concat(roams).slice(0, 8)
+    appendRoamLog(Model.roamRecord(s, before, decisionSeenAt ? now - decisionSeenAt : -1, now, config, penalties()))
 
     if (notifyRoams) {
       Quickshell.execDetached([
@@ -184,34 +211,77 @@ Item {
     }
   }
 
-  onSocketPathChanged: { state = null; rssiHistory = []; _roamBaseline = false }
-
-  Socket {
-    id: socket
-    path: root.socketPath
-    connected: root.active && root.socketPath !== ""
-    parser: SplitParser {
-      onRead: function(line) { root._pendingLine = line }
-    }
-    onConnectedChanged: {
-      root._roamBaseline = false
-      if (!connected) root.state = null
-    }
-    onError: function(error) {
-      if (!root.socketAccess) root.lastError = "No access to " + root.socketPath + " — rerun install to add the socket drop-in"
+  function penalties() {
+    try {
+      var parsed = JSON.parse(String(penaltyView.text() || "null"))
+      return Array.isArray(parsed) ? parsed : []
+    } catch (e) {
+      return []
     }
   }
 
+  // One JSON object per line. Rotated at 20 MB (one previous file kept).
+  function appendRoamLog(record) {
+    if (iface === "") return
+    var line = JSON.stringify(record)
+    Quickshell.execDetached(["sh", "-c",
+      'mkdir -p "$(dirname "$1")" && ' +
+      'if [ "$(stat -c %s "$1" 2>/dev/null || echo 0)" -gt 20971520 ]; then mv -f "$1" "${1%.jsonl}.1.jsonl"; fi && ' +
+      'printf "%s\\n" "$2" >> "$1"',
+      "roamctl-log", roamLogPath, line])
+    roamsLogged += 1
+  }
+
+  function exportRoams() {
+    if (exportProcess.running) return
+    exportProcess.command = [helperPath, "export", iface]
+    exportProcess.running = true
+  }
+
+  onSocketPathChanged: { state = null; rssiHistory = []; _roamBaseline = false }
+
   // roamctl creates its socket a moment after the unit goes active, and
-  // restarts on failure; keep nudging the socket until it attaches.
-  Timer {
-    interval: 2000
-    repeat: true
-    running: root.active && !socket.connected
-    onTriggered: {
-      socket.connected = false
-      socket.connected = Qt.binding(function() { return root.active && root.socketPath !== "" })
+  // restarts on failure or after a config apply. A Socket that was refused
+  // never retries, so liveness is tracked from frames: no frame for 3 s
+  // while the unit is active tears the Socket down and builds a fresh one.
+  property double _lastFrameAt: 0
+  property bool _socketWanted: true
+
+  Loader {
+    active: root.active && root.socketPath !== "" && root._socketWanted
+    sourceComponent: Component {
+      Socket {
+        path: root.socketPath
+        connected: true
+        parser: SplitParser {
+          onRead: function(line) { root.handleFrame(line) }
+        }
+        onConnectedChanged: {
+          root._roamBaseline = false
+          if (!connected) root.state = null
+        }
+        onError: function(error) {
+          if (!root.socketAccess) root.lastError = "No access to " + root.socketPath + " — rerun install to add the socket drop-in"
+        }
+      }
     }
+  }
+
+  Timer {
+    interval: 1500
+    repeat: true
+    running: root.active
+    onTriggered: {
+      if (Date.now() - root._lastFrameAt < 3000 || !root._socketWanted) return
+      root._socketWanted = false
+      reconnectKick.restart()
+    }
+  }
+
+  Timer {
+    id: reconnectKick
+    interval: 250
+    onTriggered: root._socketWanted = true
   }
 
   Timer {
@@ -224,7 +294,7 @@ Item {
   Timer {
     interval: root.panelOpen ? 250 : 1000
     repeat: true
-    running: socket.connected
+    running: root.active
     onTriggered: root.applyPending()
   }
 
@@ -248,6 +318,39 @@ Item {
         ticks = 0
         running = false
         root._desired = -1
+      }
+    }
+  }
+
+  // roamctl's per-AP failure penalties; penalized APs are dropped from the
+  // scored list, so the export records which were excluded at roam time.
+  FileView {
+    id: penaltyView
+    path: root.iface !== "" ? "/run/roamctl/" + root.iface + "_penalty.json" : ""
+    watchChanges: true
+    printErrors: false
+  }
+
+  Process {
+    id: exportProcess
+    stdout: StdioCollector {
+      id: exportOut
+      waitForEnd: true
+    }
+    stderr: StdioCollector {
+      id: exportErr
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      var path = String(exportOut.text || "").trim().split("\n").pop()
+      if (exitCode === 0 && path !== "") {
+        Quickshell.execDetached(["notify-send", "--app-name=roamctl", "--icon=x-office-spreadsheet",
+          "Roam log exported", path])
+        Quickshell.execDetached(["uwsm-app", "--", "nautilus", "--select", "file://" + path])
+      } else {
+        var message = String(exportErr.text || "").trim() || "Export failed"
+        Quickshell.execDetached(["notify-send", "--app-name=roamctl", "--urgency=normal",
+          "Roam export failed", message.split("\n").pop()])
       }
     }
   }

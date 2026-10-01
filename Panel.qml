@@ -118,6 +118,7 @@ Panel {
     else if (action === "restart") roamctl.restart()
     else if (action === "install") roamctl.install()
     else if (action === "setup") roamctl.setup()
+    else if (action === "export") { roamctl.exportRoams(); return }
     else return
     if (action !== "restart") root.close()
   }
@@ -151,6 +152,7 @@ Panel {
     function close(): void { root.close() }
     function toggle(): void { root.toggle() }
     function tui(): void { roamctl.openTui() }
+    function exportRoams(): void { roamctl.exportRoams() }
     function tuning(): void { root.open(); root.setTuningOpen(true) }
     function enable(): void { roamctl.setRunning(true) }
     function disable(): void { roamctl.setRunning(false) }
@@ -201,6 +203,7 @@ Panel {
         var key = String(t).toLowerCase()
         if (key === "t") root.run("tui")
         else if (key === "c") root.run("config")
+        else if (key === "e") root.run("export")
         else if (key === "l") root.run("logs")
         else if (key === "r") root.run("restart")
         else if (key === "i" && !roamctl.installed) root.run("install")
@@ -300,11 +303,14 @@ Panel {
               onClicked: root.run("tui")
             }
             PanelActionButton {
-              iconText: "\uf013"
-              tooltipText: "Edit config (c)"
+              iconText: "\uf1c3"
+              tooltipText: roamctl.roamsLogged > 0
+                ? "Export " + roamctl.roamsLogged + " logged roam" + (roamctl.roamsLogged === 1 ? "" : "s") + " with scan lists to CSV (e)"
+                : "Export roams to CSV (e) · nothing logged yet"
               foreground: root.foreground
               fontFamily: root.fontFamily
-              onClicked: root.run("config")
+              enabled: roamctl.roamsLogged > 0 && !roamctl.exporting
+              onClicked: root.run("export")
             }
             PanelActionButton {
               iconText: "\uf03a"

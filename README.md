@@ -14,7 +14,8 @@ wpa_supplicant-based Wi-Fi roaming daemon.
   roamctl@iface, authorized through the Omarchy polkit agent), current AP,
   channel, signal, rates, retries, a 90 s RSSI sparkline, the top scored
   APs from roamctl's candidate list, and a log of recent roams.
-  Keys: `t` TUI · `c` edit config · `l` logs · `r` restart · `Enter` toggle.
+  Keys: `t` TUI · `e` export · `c` edit config · `l` logs · `r` restart ·
+  `Enter` toggle.
 - **Tuning.** Edit tier RSSI floors, per-tier score deltas, and band
   preference in the panel, then **Apply & restart**. Values are checked
   against roamctl's own validation rules before anything is written, and the
@@ -22,6 +23,9 @@ wpa_supplicant-based Wi-Fi roaming daemon.
   config in your editor; when you close it, the file is validated, saved,
   and roamctl restarts. Invalid edits are never written. The previous
   version is kept in `~/.local/state/roamctl-omarchy/`.
+- **Roam export.** Every roam is logged with the scored scan list roamctl
+  chose from. The spreadsheet button exports the log to a CSV in
+  `~/Downloads` (see below).
 - **Roam notifications.** Each completed roam posts a notification with the
   target AP, band, channel, RSSI, and roam time. Turn this off with the
   `notifyRoams` setting.
@@ -52,14 +56,46 @@ permissions.
 
 roamctl needs NetworkManager/wpa_supplicant. It does not work with iwd.
 
+## Roam log and export
+
+The plugin watches every IPC frame (about 100 ms apart). When a roam
+completes, it logs one JSON object to
+`~/.local/state/roamctl-omarchy/roams-<iface>.jsonl` (rotated at 20 MB). The
+object holds:
+
+- the roam result: target and final BSSID, duration, result flag, message
+- a **decision snapshot**: the last frame published before the roam
+  started, including the full scored `BSSList` with per-component scores,
+  the tier, hysteresis and health flags, and the connection metrics at that
+  moment. `snapshotAgeMs` records how long before the roam landed it was
+  captured.
+- the connection after the roam
+- roamctl's AP penalty list (APs excluded from scoring after failed roams)
+- the full config in effect
+
+Logging happens whenever the shell is running, even with the panel closed.
+Roams that happen while the shell isn't running aren't captured.
+
+**Export** (spreadsheet button, `e`, or `roamctl-omarchy export`) flattens
+the log into a CSV with one row per candidate AP per roam. Roam-level
+columns repeat on every row, so you can filter or pivot by `roam_id`. Per
+candidate, it includes rank, RSSI/SNR/utilization/clients, every score
+component, `cand_delta_vs_current`, and `cand_meets_required_delta`.
+roamctl only tries the top-ranked candidate, and only if its score beats
+the current AP by the tier's `required_delta`. RSSI hysteresis blocks the
+roam unless the gap is at least `hysteresis_override_delta`. Roams the AP
+requested via BSS Transition Management (802.11v) aren't scored by roamctl,
+so their deltas don't explain the choice.
+
 ## Helper
 
 ```
 roamctl-omarchy install|setup|uninstall
-roamctl-omarchy status|enable|disable|restart|tui|config|logs [iface]
+roamctl-omarchy status|enable|disable|restart|tui|config|logs|export [iface]
 roamctl-omarchy apply <iface> section.key=value...
 roamctl-config get|check FILE
 roamctl-config set FILE section.key=value...
+roamctl-export LOG.jsonl... -o OUT.csv
 ```
 
 ## Settings (shell.json bar entry)
@@ -73,5 +109,5 @@ roamctl-config set FILE section.key=value...
 ## Shell IPC
 
 ```bash
-omarchy-shell jwil007.roamctl toggle|open|close|tuning|tui|enable|disable|status
+omarchy-shell jwil007.roamctl toggle|open|close|tuning|tui|exportRoams|enable|disable|status
 ```

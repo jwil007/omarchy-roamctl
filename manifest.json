@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "jwil007.roamctl",
   "name": "roamctl",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "author": "jwil007",
   "license": "MIT",
   "description": "Enable roamctl's Wi-Fi roaming daemon, watch its live roaming tier, RSSI and scored APs, and get notified when it roams.",

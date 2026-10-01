@@ -14,6 +14,7 @@
 #   roamctl-omarchy apply <iface> section.key=value...
 #                                     validate + write config values, restart if running (JSON result)
 #   roamctl-omarchy logs [iface]      follow the service journal in a terminal
+#   roamctl-omarchy export [iface]    write the roam log (scored scan list per roam) to a CSV in Downloads
 #
 # When [iface] is omitted, the first wireless interface is used.
 
@@ -30,6 +31,11 @@ STATE_DIR="${XDG_STATE_HOME:-$HOME/.local/state}/roamctl-omarchy"
 SETUP_VERSION=2
 SELF="$(readlink -f "${BASH_SOURCE[0]}")"
 CONFIG_TOOL="$(dirname "$SELF")/roamctl-config"
+EXPORT_TOOL="$(dirname "$SELF")/roamctl-export"
+
+roam_log() {
+  echo "$STATE_DIR/roams-$1.jsonl"
+}
 
 fail() {
   echo "roamctl-omarchy: $*" >&2
@@ -66,8 +72,9 @@ in_terminal() {
 }
 
 cmd_status() {
-  local iface active enabled version setup config
+  local iface active enabled version setup config logged
   iface="$(resolve_iface "${1:-}")"
+  logged="$({ cat "$(roam_log "$iface")" "$STATE_DIR/roams-$iface.1.jsonl" 2>/dev/null || true; } | wc -l)"
   version="$(installed_version)"
   config="$CONFIG_DIR/$iface.toml"
   setup="$(sed -n 's/^# roamctl-omarchy setup v\([0-9]*\)$/\1/p' "$DROPIN_PATH" 2>/dev/null || true)"
@@ -86,6 +93,7 @@ cmd_status() {
     --argjson configWritable "$([[ -w $config ]] && echo true || echo false)" \
     --argjson setup "${setup:-0}" \
     --argjson setupWanted "$SETUP_VERSION" \
+    --argjson logged "${logged:-0}" \
     '{
       iface: $iface,
       installed: ($version != "" and $unit),
@@ -98,7 +106,8 @@ cmd_status() {
       config: $config,
       configExists: $configExists,
       configWritable: $configWritable,
-      setupCurrent: ($setup >= $setupWanted)
+      setupCurrent: ($setup >= $setupWanted),
+      roamsLogged: $logged
     }'
 }
 
@@ -346,6 +355,17 @@ cmd_apply() {
   [[ $status != 1 ]]
 }
 
+cmd_export() {
+  local iface dir log out
+  iface="$(resolve_iface "${1:-}")"
+  log="$(roam_log "$iface")"
+  dir="$(xdg-user-dir DOWNLOAD 2>/dev/null || true)"
+  [[ -n $dir && -d $dir && $dir != "$HOME" ]] || dir="$HOME/Downloads"
+  mkdir -p "$dir"
+  out="$dir/roamctl-roams-$iface-$(date +%Y%m%d-%H%M%S).csv"
+  "$EXPORT_TOOL" "${log%.jsonl}.1.jsonl" "$log" -o "$out"
+}
+
 cmd_logs() {
   local iface
   iface="$(resolve_iface "${1:-}")"
@@ -364,5 +384,6 @@ case "${1:-}" in
   tui) shift; cmd_tui "$@" ;;
   config) shift; cmd_config "$@" ;;
   logs) shift; cmd_logs "$@" ;;
-  *) sed -n '3,19p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
+  export) shift; cmd_export "$@" ;;
+  *) sed -n '3,20p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
