@@ -257,7 +257,9 @@ Item {
       Quickshell.execDetached([
         "notify-send", "--app-name=roamctl", "--transient",
         "--urgency=" + (entry.success ? "low" : "normal"),
-        "--icon=network-wireless",
+        // Nerd Font glyph via Omarchy's hint; "network-wireless" isn't in
+        // Yaru, and the missing themed icon renders as Qt's checkerboard.
+        "--hint=string:omarchy-glyph:" + (entry.success ? "\u{f05a9}" : "\u{f05aa}"),
         entry.success ? "Wi-Fi roamed" : "Wi-Fi roam failed",
         entry.summary
       ])
