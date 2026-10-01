@@ -54,11 +54,20 @@ Canvas {
     var visibleMarks = marks.filter(function(t) { return t.value >= lo && t.value <= hi })
     if (visibleMarks.length > 0) {
       ctx.setLineDash([3, 3])
-      visibleMarks.forEach(function(t) {
+      // Lines always draw; labels closer than ~11 px merge into one ("E/F").
+      var labels = []
+      visibleMarks.slice().sort(function(a, b) { return b.value - a.value }).forEach(function(t) {
         var yy = Math.round(y(t.value)) + 0.5
         ctx.beginPath(); ctx.moveTo(labelW, yy); ctx.lineTo(width, yy); ctx.stroke()
-        ctx.fillText(t.label + " " + t.value, 0, yy + 3.5)
+        var prev = labels[labels.length - 1]
+        if (prev && yy - prev.y < 11) {
+          prev.text = prev.letters + "/" + t.label
+          prev.letters = prev.text
+        } else {
+          labels.push({ y: yy, text: t.label + " " + t.value, letters: t.label })
+        }
       })
+      labels.forEach(function(l) { ctx.fillText(l.text, 0, l.y + 3.5) })
       ctx.setLineDash([])
     } else {
       ;[hi, lo].forEach(function(v) {

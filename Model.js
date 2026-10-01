@@ -211,36 +211,41 @@ function connSnapshot(s) {
 }
 
 // One roam, as logged to roams-<iface>.jsonl and expanded by roamctl-export.
-// `before` is the last frame published before the roam started; its BSSList
-// is the scored scan list the target was chosen from.
-function roamRecord(after, before, decisionAgeMs, nowMs, config, penalties) {
+//   result:   the frame where the roam's CompletedAt first appeared
+//   decision: the frame holding the scored list the target was chosen from
+//             (meta.source: "roam-start" = first RoamInProgress frame,
+//             "pre-roam" = last frame before it, for sub-frame roams)
+//   after:    the first frame reporting the final BSSID (meta.settled), else
+//             the latest frame when the 3 s settle window ran out
+function roamRecord(result, decision, after, meta, config, penalties) {
   var cfg = config || {}
-  var tier = before ? before.RoamingTier : ""
+  var tier = decision ? decision.RoamingTier : ""
   var deltaKey = TIER_DELTA_KEYS[tier]
   return {
-    schema: 1,
-    loggedAt: new Date(nowMs).toISOString(),
-    iface: after.Iface || "",
-    ssid: after.SSID || (before ? before.SSID : "") || "",
+    schema: 2,
+    loggedAt: new Date(meta.nowMs).toISOString(),
+    iface: result.Iface || "",
+    ssid: result.SSID || (decision ? decision.SSID : "") || "",
     roam: {
-      completedAt: after.CompletedAt,
-      success: after.Success === true,
-      resultFlag: after.RoamResultFlag || "",
-      message: after.Message || "",
-      targetBssid: after.TargetBSSID || "",
-      finalBssid: after.FinalBSSID || "",
-      durationMs: durationMs(after.Duration)
+      completedAt: result.CompletedAt,
+      success: result.Success === true,
+      resultFlag: result.RoamResultFlag || "",
+      message: result.Message || "",
+      targetBssid: result.TargetBSSID || "",
+      finalBssid: result.FinalBSSID || "",
+      durationMs: durationMs(result.Duration)
     },
     decision: {
-      // How long before the roam landed we last saw a pre-roam frame.
-      snapshotAgeMs: decisionAgeMs,
+      source: meta.source,
+      // How long before the roam's completion was observed this frame arrived.
+      snapshotAgeMs: meta.snapshotAgeMs,
       tier: tier,
       requiredDelta: deltaKey && cfg[deltaKey] !== undefined ? cfg[deltaKey] : null,
       hysteresisOverrideDelta: cfg["roaming_tiers.fair_score_delta"] !== undefined ? cfg["roaming_tiers.fair_score_delta"] * 2 : null,
-      connection: connSnapshot(before),
-      bssList: before && Array.isArray(before.BSSList) ? before.BSSList : []
+      connection: connSnapshot(decision),
+      bssList: decision && Array.isArray(decision.BSSList) ? decision.BSSList : []
     },
-    after: connSnapshot(after),
+    after: Object.assign(connSnapshot(after) || {}, { settled: meta.settled === true, settleMs: meta.settleMs }),
     penalties: penalties || [],
     config: cfg
   }

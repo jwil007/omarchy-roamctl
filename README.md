@@ -1,37 +1,85 @@
 # roamctl for Omarchy
 
-Omarchy shell plugin for [roamctl](https://github.com/jwil007/roamctl), the
-wpa_supplicant-based Wi-Fi roaming daemon.
+**Your laptop's Wi-Fi roaming, out in the open.** An Omarchy bar widget for
+[roamctl](https://github.com/jwil007/roamctl), a configurable, score-based
+roaming engine that replaces wpa_supplicant's `bgscan`. Watch it think, tune
+it live, and export the evidence behind every roam.
 
-<img src="docs/panel.png" alt="roamctl panel in the Omarchy bar" width="420">
+<p>
+  <img src="docs/panel.png" alt="roamctl panel: live tier, signal graph with tier floors, scored APs, recent roams" width="400">
+  &nbsp;
+  <img src="docs/tuning.png" alt="Quick tuning: tier floors, score deltas, band preference" width="400">
+</p>
 
-- **Bar widget.** Four signal bars show roamctl's live roaming tier
-  (Excellent → Critical). Critical turns urgent, and the bars pulse while a
-  roam is in flight. Dimmed means the service is stopped.
-  Click opens the panel, middle-click opens `roamctl-tui`, right-click
-  starts or stops the service.
-- **Panel.** On/off switch (`systemctl enable --now` / `disable --now`
-  roamctl@iface, authorized through the Omarchy polkit agent), current AP,
-  channel, signal, rates, retries, a 90 s RSSI sparkline, the top scored
-  APs from roamctl's candidate list, and a log of recent roams.
-  Keys: `t` TUI · `e` export · `c` edit config · `l` logs · `r` restart ·
-  `Enter` toggle.
-- **Tuning.** Edit tier RSSI floors, per-tier score deltas, and band
-  preference in the panel, then **Apply & restart**. Values are checked
-  against roamctl's own validation rules before anything is written, and the
-  tier floors are drawn on the signal graph. The pencil button opens the full
-  config in your editor; when you close it, the file is validated, saved,
-  and roamctl restarts. Invalid edits are never written. The previous
-  version is kept in `~/.local/state/roamctl-omarchy/`.
-- **Roam export.** Every roam is logged with the scored scan list roamctl
-  chose from. The spreadsheet button exports the log to a CSV in
-  `~/Downloads` (see below).
-- **Roam notifications.** Each completed roam posts a notification with the
-  target AP, band, channel, RSSI, and roam time. Turn this off with the
-  `notifyRoams` setting.
+```bash
+omarchy plugin add https://github.com/jwil007/omarchy-roamctl.git
+```
 
-The live data comes straight from roamctl's IPC socket
-(`/run/roamctl/<iface>.sock`, one JSON `ProcessState` per signal poll).
+## Features
+
+### 📶 Roaming tier at a glance
+Four bars in your bar show roamctl's live roaming tier, from **Excellent**
+(roaming paused) down to **Critical** (aggressive roaming). The icon turns
+urgent at Critical and pulses while a roam is in flight. It reads roamctl's
+IPC stream directly, with no polling of `iw` or NetworkManager.
+
+### 🔬 See every AP roamctl is considering
+One click shows the current AP, band and channel, RSSI vs average, Tx/Rx rate
+and MCS, retry rate, and scan state. Below that is **every candidate AP with
+its live score**, the same ranked list roamctl roams from, so you can watch
+a 6 GHz AP climb past your current 5 GHz AP before the switch.
+
+### 📈 Signal graph with your tier floors
+A 90-second RSSI trace with your Excellent / Fair / Degraded floors drawn as
+lines, so you can see how close you are to the next tier and why roamctl is
+(or isn't) scanning.
+
+### 🎛️ Live tuning, no sudo, no terminal
+Change tier RSSI floors, per-tier score deltas, and band preference right in
+the panel, then hit **Apply & restart**. Every change is checked against a
+copy of roamctl's own validation rules before it touches `/etc`, so you can't
+save a config the daemon won't start with. Your comments in the file are
+preserved.
+
+### ✍️ Full-config editing with a safety net
+The pencil opens the whole TOML in your editor. Close it, and the plugin
+validates, saves, and restarts roamctl. An invalid edit is never written:
+you're offered **edit again** or **discard**. The previous version is always
+kept.
+
+### 🧾 Roam forensics export
+Every roam is logged with **the exact scored scan list roamctl decided
+from**, captured from the frame roamctl publishes as the roam starts, along
+with roamctl's own journal lines for that roam. One click exports it all to
+a CSV, one row per candidate AP per roam, ready for a spreadsheet or pandas:
+
+| roam | tier | required Δ | candidate | rank | RSSI | score | Δ vs current | meets Δ | target |
+|---|---|---|---|---|---|---|---|---|---|
+| 1 | active_roaming | 6 | 02:00:5e:10:22:40 | 1 | −58 | 75 | +11 | ✅ | ✅ |
+| 1 | active_roaming | 6 | 02:00:5e:10:33:30 | 2 | −52 | 69 | +5 | ❌ | |
+| 1 | active_roaming | 6 | 02:00:5e:10:22:30 | 3 | −53 | 64 | 0 | (current) | |
+
+It answers "why that AP?" (and "why not this one?") with numbers: every
+score component (RSSI, SNR, band, width, utilization, PHY), the tier's
+required delta, the hysteresis override threshold, penalized APs, the full
+config in effect, and the connection before and after the roam. It even
+flags when roamctl's own result line disagrees with where the station
+actually landed.
+
+### 🔔 Roam notifications
+Get a notification for every roam: target AP, band, channel, RSSI, and how
+many milliseconds it took. Failures get a louder notification.
+
+### ⌨️ Keyboard-first, Omarchy-native
+Themed with your Omarchy colors and fonts, keyboard navigable (`t` TUI ·
+`e` export · `c` config · `l` logs · `r` restart · `Enter` on/off), and
+scriptable over shell IPC. Middle-click the icon for `roamctl-tui`;
+right-click to start or stop roaming.
+
+### 🛠️ One-click install
+The panel installs roamctl for you: it fetches the latest release, verifies
+its SHA-256 checksums, installs the systemd unit, and sets up permissions so
+nothing else needs sudo.
 
 ## Install
 
@@ -39,55 +87,54 @@ The live data comes straight from roamctl's IPC socket
 omarchy plugin add https://github.com/jwil007/omarchy-roamctl.git
 ```
 
-Then open the widget's panel and click **Install roamctl**, or run
+Open the widget and click **Install roamctl**, or run
 `~/.config/omarchy/plugins/jwil007.roamctl/bin/roamctl-omarchy install`.
+Then flip the switch to enable roaming.
 
-`install` downloads the latest release, verifies its checksums, installs
-`roamctl` and `roamctl-tui` to `/usr/local/bin`, and installs the upstream
-`roamctl@.service` unit. It also adds a drop-in
-(`/etc/systemd/system/roamctl@.service.d/omarchy.conf`) that hands the IPC
-socket and config to the `wheel` group, plus a polkit rule that lets an
-active local `wheel` session start, stop, and restart `roamctl@` units
-without a password. That way the widget, `roamctl-tui`, and quick tuning
-work without sudo. Enabling and disabling the unit still asks for
-authorization. Run `install` again to upgrade. On an existing install, run
-`roamctl-omarchy setup` (or click **Enable quick tuning**) to add just the
-permissions.
+Requires NetworkManager with wpa_supplicant. iwd isn't supported, because
+roamctl drives wpa_supplicant's control interface.
 
-roamctl needs NetworkManager/wpa_supplicant. It does not work with iwd.
+### What install changes
+- `roamctl` and `roamctl-tui` → `/usr/local/bin`, plus the upstream
+  `roamctl@.service` unit.
+- A drop-in at `/etc/systemd/system/roamctl@.service.d/omarchy.conf` that
+  gives the `wheel` group access to roamctl's IPC socket and config file.
+  The socket is broadcast-only (roamctl never reads from it), and `wheel`
+  can already sudo.
+- A polkit rule at `/etc/polkit-1/rules.d/50-roamctl-omarchy.rules` letting
+  an active local `wheel` session start, stop, and restart `roamctl@` units
+  without a password. It covers no other unit. Enabling and disabling the
+  unit still asks for authorization.
 
-## Roam log and export
+Run `install` again to upgrade. On an existing roamctl install, `setup` (or
+**Enable quick tuning**) adds only the permissions. `uninstall` removes
+everything except your config.
 
-The plugin watches every IPC frame (about 100 ms apart). When a roam
-completes, it logs one JSON object to
-`~/.local/state/roamctl-omarchy/roams-<iface>.jsonl` (rotated at 20 MB). The
-object holds:
+## How the roam log works
 
-- the roam result: target and final BSSID, duration, result flag, message
-- a **decision snapshot**: the last frame published before the roam
-  started, including the full scored `BSSList` with per-component scores,
-  the tier, hysteresis and health flags, and the connection metrics at that
-  moment. `snapshotAgeMs` records how long before the roam landed it was
-  captured.
-- the connection after the roam
-- roamctl's AP penalty list (APs excluded from scoring after failed roams)
-- the full config in effect
+The plugin reads every IPC frame (about 100 ms apart). For each completed
+roam it appends one JSON object to
+`~/.local/state/roamctl-omarchy/roams-<iface>.jsonl` (rotated at 20 MB):
 
-Logging happens whenever the shell is running, even with the panel closed.
-Roams that happen while the shell isn't running aren't captured.
+- **result**: target and final BSSID, duration, result flag, message
+- **decision**: the scored `BSSList` from the first frame published with
+  `RoamInProgress` set. roamctl scores the scan and publishes that snapshot
+  as it starts the roam, so this is the list the target was chosen from.
+  Roams shorter than one frame fall back to the frame just before
+  (`decision.source`). Also includes the tier, required delta, hysteresis
+  and health flags, and connection metrics.
+- **after**: the connection once the station reports the final BSSID (or
+  after 3 s; see `after.settled`)
+- **journal**: roamctl's own log lines for the roam window: candidate
+  evaluation with scaled score components, measured and required delta, and
+  the result
+- **penalties** (APs excluded after failed roams) and the full **config**
 
-**Export** (spreadsheet button, `e`, or `roamctl-omarchy export`) flattens
-the log into a CSV with one row per candidate AP per roam. Roam-level
-columns repeat on every row, so you can filter or pivot by `roam_id`. Per
-candidate, it includes rank, RSSI/SNR/utilization/clients, every score
-component, `cand_delta_vs_current`, and `cand_meets_required_delta`.
-roamctl only tries the top-ranked candidate, and only if its score beats
-the current AP by the tier's `required_delta`. RSSI hysteresis blocks the
-roam unless the gap is at least `hysteresis_override_delta`. Roams the AP
-requested via BSS Transition Management (802.11v) aren't scored by roamctl,
-so their deltas don't explain the choice.
+Roams are logged whenever the Omarchy shell is running, even with the panel
+closed. Roams the AP requests via 802.11v BSS Transition Management aren't
+scored by roamctl, so score deltas don't explain those.
 
-## Helper
+## Reference
 
 ```
 roamctl-omarchy install|setup|uninstall
@@ -98,7 +145,13 @@ roamctl-config set FILE section.key=value...
 roamctl-export LOG.jsonl... -o OUT.csv
 ```
 
-## Settings (shell.json bar entry)
+Shell IPC:
+
+```bash
+omarchy-shell jwil007.roamctl toggle|open|close|tuning|tui|exportRoams|enable|disable|status
+```
+
+Settings (the widget's entry in `~/.config/omarchy/shell.json`):
 
 | key              | default | meaning                                  |
 |------------------|---------|------------------------------------------|
@@ -106,8 +159,6 @@ roamctl-export LOG.jsonl... -o OUT.csv
 | `notifyRoams`    | `true`  | notify on each roam                      |
 | `candidateCount` | `5`     | scored APs listed in the panel           |
 
-## Shell IPC
+## License
 
-```bash
-omarchy-shell jwil007.roamctl toggle|open|close|tuning|tui|exportRoams|enable|disable|status
-```
+MIT

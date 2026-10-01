@@ -55,8 +55,12 @@ Item {
   readonly property int historyLength: 90
 
   property string _pendingLine: ""
-  property string _decisionLine: ""
-  property double _decisionSeenAt: 0
+  property string _preRoamLine: ""
+  property double _preRoamSeenAt: 0
+  property string _startLine: ""
+  property double _startSeenAt: 0
+  property bool _wasInProgress: false
+  property var _pendingRoam: null
   readonly property string stateDir: (Quickshell.env("XDG_STATE_HOME") || (Quickshell.env("HOME") + "/.local/state")) + "/roamctl-omarchy"
   readonly property string roamLogPath: iface !== "" ? stateDir + "/roams-" + iface + ".jsonl" : ""
   property int roamsLogged: 0
@@ -148,15 +152,28 @@ Item {
     if (next) state = next
   }
 
-  // Runs for every ~100 ms frame, so it only does cheap string checks; frames
-  // are fully parsed just for the UI tick above or when a roam lands. The last
-  // frame published before a roam started is kept as the decision snapshot:
-  // it holds the scored scan list roamctl chose the target from.
+  // Runs for every ~100 ms frame, so it mostly does cheap string checks;
+  // frames are fully parsed for the UI tick above or around a roam.
+  //
+  // Decision snapshot: roamctl scores a fresh scan and decides in the same
+  // step, then publishes a snapshot as it sets RoamInProgress. So the first
+  // in-progress frame holds the scored list the target was chosen from. The
+  // pre-roam frame can still carry the previous scan's scores, so it's only
+  // a fallback for roams shorter than one frame.
+  //
+  // After snapshot: the completion frame still reports the old connection,
+  // so the roam is finalized once the station reports the final BSSID (or
+  // after 3 s).
   function handleFrame(line) {
-    _lastFrameAt = Date.now()
+    var now = Date.now()
+    _lastFrameAt = now
     _pendingLine = line
+    var inProgress = inProgressRe.test(line)
     var m = completedRe.exec(line)
     var completedAt = m && !Model.isZeroTime(m[1]) ? m[1] : ""
+
+    if (_pendingRoam) settlePendingRoam(line, now)
+
     // The first frame after (re)connecting carries whatever roam happened
     // before we attached; remember it without announcing it.
     if (!_roamBaseline) {
@@ -164,16 +181,42 @@ Item {
       _lastRoamAt = completedAt
     } else if (completedAt !== "" && completedAt !== _lastRoamAt) {
       _lastRoamAt = completedAt
-      recordRoam(_decisionLine, _decisionSeenAt, line)
+      if (_pendingRoam) finalizeRoam(_pendingRoam, "", now)
+      var startSeen = _startLine !== ""
+      _pendingRoam = {
+        resultLine: line,
+        decisionLine: startSeen ? _startLine : _preRoamLine,
+        decisionSource: startSeen ? "roam-start" : "pre-roam",
+        decisionSeenAt: startSeen ? _startSeenAt : _preRoamSeenAt,
+        completedSeenAt: now
+      }
+      _startLine = ""
+      settlePendingRoam(line, now)
     }
-    if (!inProgressRe.test(line)) {
-      _decisionLine = line
-      _decisionSeenAt = Date.now()
+
+    if (inProgress && !_wasInProgress) {
+      _startLine = line
+      _startSeenAt = now
     }
+    if (!inProgress) {
+      _preRoamLine = line
+      _preRoamSeenAt = now
+    }
+    _wasInProgress = inProgress
   }
 
   readonly property var completedRe: /"CompletedAt":\s*"([^"]*)"/
   readonly property var inProgressRe: /"RoamInProgress":\s*true/
+
+  function settlePendingRoam(line, now) {
+    var p = _pendingRoam
+    var frame = Model.parseState(line)
+    var result = p._result || (p._result = Model.parseState(p.resultLine))
+    if (!result) { _pendingRoam = null; return }
+    var finalBssid = String(result.FinalBSSID || "").toLowerCase()
+    var landed = frame && finalBssid !== "" && String(frame.BSSID || "").toLowerCase() === finalBssid
+    if (landed || now - p.completedSeenAt >= 3000) finalizeRoam(p, landed ? line : "", now, frame)
+  }
 
   function pushRssi(rssi) {
     if (!rssi) return
@@ -182,23 +225,33 @@ Item {
     rssiHistory = next
   }
 
-  function recordRoam(decisionLine, decisionSeenAt, resultLine) {
-    var s = Model.parseState(resultLine)
-    if (!s) return
-    var before = Model.parseState(decisionLine)
-    var now = Date.now()
+  function finalizeRoam(p, settledLine, now, lastFrame) {
+    _pendingRoam = null
+    var result = p._result || Model.parseState(p.resultLine)
+    if (!result) return
+    var decision = Model.parseState(p.decisionLine)
+    var settled = settledLine !== ""
+    var after = settled ? Model.parseState(settledLine) : (lastFrame || result)
 
-    var target = Model.findBss(before ? before.BSSList : [], s.TargetBSSID) || Model.findBss(s.BSSList, s.FinalBSSID || s.TargetBSSID)
+    var target = Model.findBss(decision ? decision.BSSList : [], result.TargetBSSID) || Model.findBss(result.BSSList, result.FinalBSSID || result.TargetBSSID)
     var entry = {
-      at: new Date(now),
-      success: s.Success === true,
-      bssid: String(s.FinalBSSID || s.TargetBSSID || ""),
-      durationMs: Model.durationMs(s.Duration),
-      summary: Model.roamSummary(s, target),
-      tier: Model.tierLabel(before ? before.RoamingTier : s.RoamingTier)
+      at: new Date(p.completedSeenAt),
+      success: result.Success === true,
+      bssid: String(result.FinalBSSID || result.TargetBSSID || ""),
+      durationMs: Model.durationMs(result.Duration),
+      summary: Model.roamSummary(result, target),
+      tier: Model.tierLabel(decision ? decision.RoamingTier : result.RoamingTier)
     }
     roams = [entry].concat(roams).slice(0, 8)
-    appendRoamLog(Model.roamRecord(s, before, decisionSeenAt ? now - decisionSeenAt : -1, now, config, penalties()))
+
+    var record = Model.roamRecord(result, decision, after, {
+      source: p.decisionSource,
+      snapshotAgeMs: p.decisionSeenAt ? p.completedSeenAt - p.decisionSeenAt : -1,
+      settled: settled,
+      settleMs: now - p.completedSeenAt,
+      nowMs: now
+    }, config, penalties())
+    logRoam(record, p.decisionSeenAt || p.completedSeenAt)
 
     if (notifyRoams) {
       Quickshell.execDetached([
@@ -220,15 +273,11 @@ Item {
     }
   }
 
-  // One JSON object per line. Rotated at 20 MB (one previous file kept).
-  function appendRoamLog(record) {
+  // The helper attaches roamctl's journal lines for the roam window and
+  // appends the record to roams-<iface>.jsonl.
+  function logRoam(record, sinceMs) {
     if (iface === "") return
-    var line = JSON.stringify(record)
-    Quickshell.execDetached(["sh", "-c",
-      'mkdir -p "$(dirname "$1")" && ' +
-      'if [ "$(stat -c %s "$1" 2>/dev/null || echo 0)" -gt 20971520 ]; then mv -f "$1" "${1%.jsonl}.1.jsonl"; fi && ' +
-      'printf "%s\\n" "$2" >> "$1"',
-      "roamctl-log", roamLogPath, line])
+    Quickshell.execDetached([helperPath, "log-roam", iface, String(Math.floor(sinceMs / 1000) - 3), JSON.stringify(record)])
     roamsLogged += 1
   }
 

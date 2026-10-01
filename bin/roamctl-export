@@ -5,8 +5,12 @@
 
 Roam-level columns repeat on every candidate row, so the file can be
 filtered or pivoted directly in a spreadsheet or pandas (group by roam_id).
-The candidate list is the scored scan list from the last frame roamctl
-published before the roam started.
+The candidate list is the scored scan list roamctl published as the roam
+started (decision_source=roam-start), or the frame just before it for roams
+shorter than one IPC frame (pre-roam). roamctl's own journal lines for the
+roam window are included: roamctl_measured_delta / roamctl_required_delta
+come from its "attempting roam" line, and roamctl_log has the full window
+(candidate evaluation with scaled score components, result).
 
 roamctl's decision rule (checkRoam in roam.go): the top-scored candidate is
 tried if its score beats the current AP's by at least the tier's required
@@ -17,7 +21,25 @@ listed in `penalized_bssids`.
 
 import csv
 import json
+import re
 import sys
+
+KV_RE = re.compile(r"(\w+)=(\S+)")
+
+
+def journal_facts(lines, target):
+    """Pull roamctl's decision and result lines for this roam."""
+    attempt = next((l for l in reversed(lines) if "attempting roam" in l and (not target or target in l)), "") or \
+        next((l for l in reversed(lines) if "attempting roam" in l), "")
+    result = next((l for l in reversed(lines) if "ROAM SUCCESS" in l or "ROAM FAILURE" in l), "")
+    a, r = dict(KV_RE.findall(attempt)), dict(KV_RE.findall(result))
+    return {
+        "roamctl_candidate": a.get("candidate_bssid", ""),
+        "roamctl_measured_delta": a.get("measured_delta", ""),
+        "roamctl_required_delta": a.get("required_delta", ""),
+        "roamctl_result_bssid": r.get("bssid", ""),
+        "roamctl_log": "\n".join(lines),
+    }
 
 ROAM_COLUMNS = [
     "roam_id", "roam_completed_at", "result", "result_flag", "message", "roam_duration_ms",
@@ -30,7 +52,12 @@ ROAM_COLUMNS = [
     "scan_mode", "last_scan_time", "bss_list_stable", "candidate_count",
     "target_bssid", "final_bssid", "landed_on_target",
     "to_band", "to_channel", "to_channel_width", "to_rssi",
+    "after_settled", "after_settle_ms",
+    "decision_source",
+    "roamctl_candidate", "roamctl_measured_delta", "roamctl_required_delta", "roamctl_result_bssid",
+    "roamctl_result_bssid_mismatch",
     "penalized_bssids",
+    "roamctl_log",
 ]
 CANDIDATE_COLUMNS = [
     "cand_rank", "cand_bssid", "cand_is_current", "cand_is_target",
@@ -56,7 +83,13 @@ def roam_fields(index, rec):
     current = next((b for b in bss if b.get("IsCurrentAP")), None)
     final = roam.get("finalBssid") or ""
     target = roam.get("targetBssid") or ""
+    facts = journal_facts(rec.get("journal") or [], target)
     return {
+        **facts,
+        "roamctl_result_bssid_mismatch": bool(facts["roamctl_result_bssid"]) and facts["roamctl_result_bssid"].lower() != final.lower(),
+        "decision_source": decision.get("source", "pre-roam (schema 1)" if rec.get("schema", 1) < 2 else ""),
+        "after_settled": after.get("settled", ""),
+        "after_settle_ms": after.get("settleMs", ""),
         "roam_id": index,
         "roam_completed_at": roam.get("completedAt", ""),
         "result": "success" if roam.get("success") else "failure",

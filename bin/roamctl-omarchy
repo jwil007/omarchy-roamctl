@@ -355,6 +355,23 @@ cmd_apply() {
   [[ $status != 1 ]]
 }
 
+# Called by the shell plugin for each completed roam: attach roamctl's own
+# journal lines for the roam window (candidate evaluation, measured/required
+# delta, result) and append the record to the roam log.
+cmd_log_roam() {
+  local iface="$1" since="$2" record="$3" log journal
+  [[ $since =~ ^[0-9]+$ ]] || fail "log-roam: bad since timestamp"
+  iface="$(resolve_iface "$iface")"
+  log="$(roam_log "$iface")"
+  mkdir -p "$STATE_DIR"
+  journal="$(journalctl -u "roamctl@$iface" --since "@$since" --no-pager -o short-iso-precise 2>/dev/null |
+    sed -E 's/\x1b\[[0-9;]*m//g; s/^(\S+) \S+ [^:]+: /\1 /' | jq -Rsc 'split("\n") | map(select(length > 0))' || echo '[]')"
+  if (($(stat -c %s "$log" 2>/dev/null || echo 0) > 20971520)); then
+    mv -f "$log" "${log%.jsonl}.1.jsonl"
+  fi
+  jq -c --argjson journal "${journal:-[]}" '. + {journal: $journal}' <<<"$record" >>"$log"
+}
+
 cmd_export() {
   local iface dir log out
   iface="$(resolve_iface "${1:-}")"
@@ -385,5 +402,6 @@ case "${1:-}" in
   config) shift; cmd_config "$@" ;;
   logs) shift; cmd_logs "$@" ;;
   export) shift; cmd_export "$@" ;;
+  log-roam) shift; cmd_log_roam "$@" ;;
   *) sed -n '3,20p' "$SELF" | sed 's/^# \{0,1\}//'; exit 1 ;;
 esac
